@@ -13,6 +13,11 @@ a {
         font-size: 70.5%;
     }
 }
+html, body {
+  background-color: #0a0a0a !important;
+  margin: 0;
+  padding: 0;
+}
 /* navbar styles moved to shared navbar.css */
 .category-page {
     background-color: #0a0a0a;
