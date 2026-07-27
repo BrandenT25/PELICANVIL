@@ -241,8 +241,10 @@ body {
     max-width: 120rem;
     /* fixed navbar clearance (was .page-columns's job when this section
        sat at the bottom of the page) now lives here since this is the
-       first element after the navbar */
-    margin: 10rem auto 0;
+       first element after the navbar. Tied directly to navbar.css's own
+       height clamp plus a fixed breathing-room gap, instead of a flat
+       10rem that left ~90px of dead space above the bar at desktop widths. */
+    margin: calc(clamp(64px, 4px + 4.6875vw, 100px) + 1.5rem) auto 0;
     padding: 1rem clamp(2rem, 1vw + 1.5rem, 5rem);
     border-left: 3px solid #cfb991;
     background-color: rgba(207, 185, 145, 0.06);
