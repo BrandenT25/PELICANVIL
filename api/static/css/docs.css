@@ -8,6 +8,11 @@ a {
   text-decoration: none;
   color: inherit;
 }
+.docs-inline-link {
+  color: #cfb991;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
 html {
   scroll-behavior: smooth;
 }

@@ -31,12 +31,34 @@
       <div class="dataset-search-bar">
         <input type="text" class="dataset-search-input" placeholder="Filter datasets by name or description">
       </div>
+      <div class="dataset-filter-bar">
+        <div class="dataset-filter-field">
+          <label for="dataset-filter-format" class="dataset-filter-label">File type</label>
+          <select id="dataset-filter-format" class="dataset-filter-select">
+            <option value="">All types</option>
+          </select>
+        </div>
+        <div class="dataset-filter-field">
+          <label for="dataset-filter-category" class="dataset-filter-label">Category</label>
+          <select id="dataset-filter-category" class="dataset-filter-select">
+            <option value="">All categories</option>
+          </select>
+        </div>
+        <div class="dataset-filter-field">
+          <label for="dataset-filter-streamable" class="dataset-filter-label">Streaming</label>
+          <select id="dataset-filter-streamable" class="dataset-filter-select">
+            <option value="">All datasets</option>
+            <option value="true">Streamable only</option>
+            <option value="false">Download only</option>
+          </select>
+        </div>
+      </div>
       <div class="dataset-search-status" style="display:none;">
         <span class="dataset-search-status-text"></span>
         <button class="dataset-search-clear">Clear search</button>
       </div>
       <div class="dataset-search-empty" style="display:none;">
-        <span class="dataset-search-empty-text">No datasets match your search.</span>
+        <span class="dataset-search-empty-text">No datasets match your search or filters.</span>
         <button class="dataset-search-empty-clear" style="display:none;">Clear search</button>
       </div>
       <div class="dataset-category-empty" style="display:none;">This category doesn't have any datasets yet.</div>

@@ -126,23 +126,31 @@ const snippetDescriptions = {
 async function fetchDatasets() {
   const categoryEmptyBox = document.querySelector(".dataset-category-empty");
   try {
-    const datasetResponse = await fetch(
-      `${window.ROOT_PATH}/retrieve-datasets`,
-    );
+    const [datasetResponse, categoryResponse] = await Promise.all([
+      fetch(`${window.ROOT_PATH}/retrieve-datasets`),
+      fetch(`${window.ROOT_PATH}/retrieve-categories`),
+    ]);
     if (!datasetResponse.ok) {
       throw new Error(`HTTP error! status ${datasetResponse.status} `);
     }
     const datasets = await datasetResponse.json();
+    // categories are only used to label the tags datasets already carry —
+    // if this fetch fails, filtering by file type/streamable still works fine
+    const categories = categoryResponse.ok ? await categoryResponse.json() : [];
+
     let visibleCount = 0;
+    const renderedDatasets = [];
     datasets.forEach((dataset) => {
       // no CATEGORY set (the /datasets/search landing) => render every
       // dataset, so the shared search filter below decides what shows
       if (!window.CATEGORY || dataset["tags"].some((tag) => tag == window.CATEGORY)) {
         addDatasetCard(dataset);
+        renderedDatasets.push(dataset);
         visibleCount += 1;
       }
     });
     initDatasetSearch();
+    initDatasetFilters(renderedDatasets, categories);
     // only the plain "this category has nothing in it" case, not a search
     // with 0 matches — that's handled by applyDatasetFilter's own empty box
     const searchParam = new URLSearchParams(window.location.search).get("search");
@@ -160,15 +168,30 @@ async function fetchDatasets() {
 }
 
 /**
- * shows only cards whose name/description contains the query,
- * used both by live typing and by an arriving ?search= parameter
- * @param {string} query
+ * shows only cards whose name/description contains the search box text AND
+ * that satisfy the three dropdown filters (file type, category, streamable),
+ * re-run on every keystroke and every dropdown change
  */
-function applyDatasetFilter(query) {
-  const cleanedQuery = query.trim().toLowerCase();
+function applyDatasetFilter() {
+  const input = document.querySelector(".dataset-search-input");
+  const formatSelect = document.querySelector("#dataset-filter-format");
+  const categorySelect = document.querySelector("#dataset-filter-category");
+  const streamableSelect = document.querySelector("#dataset-filter-streamable");
+
+  const cleanedQuery = input ? input.value.trim().toLowerCase() : "";
+  const formatValue = formatSelect ? formatSelect.value : "";
+  const categoryValue = categorySelect ? categorySelect.value : "";
+  const streamableValue = streamableSelect ? streamableSelect.value : "";
+
   let visibleCount = 0;
   document.querySelectorAll(".dataset-card").forEach((card) => {
-    const matches = !cleanedQuery || card.dataset.searchText.includes(cleanedQuery);
+    const matchesSearch = !cleanedQuery || card.dataset.searchText.includes(cleanedQuery);
+    const matchesFormat = !formatValue || card.dataset.format === formatValue;
+    const cardTags = card.dataset.tags ? card.dataset.tags.split("|") : [];
+    const matchesCategory = !categoryValue || cardTags.includes(categoryValue);
+    const matchesStreamable = !streamableValue || card.dataset.streamable === streamableValue;
+
+    const matches = matchesSearch && matchesFormat && matchesCategory && matchesStreamable;
     card.style.display = matches ? "" : "none";
     if (matches) {
       visibleCount += 1;
@@ -202,18 +225,18 @@ function initDatasetSearch() {
     input.value = searchParam;
     statusText.textContent = `Showing results for "${searchParam}"`;
     status.style.display = "flex";
-    applyDatasetFilter(searchParam);
+    applyDatasetFilter();
   }
 
   input.addEventListener("input", () => {
     status.style.display = "none";
-    applyDatasetFilter(input.value);
+    applyDatasetFilter();
   });
 
   function clearSearch() {
     input.value = "";
     status.style.display = "none";
-    applyDatasetFilter("");
+    applyDatasetFilter();
     const url = new URL(window.location);
     url.searchParams.delete("search");
     window.history.replaceState({}, "", url);
@@ -221,6 +244,62 @@ function initDatasetSearch() {
 
   clearButton.addEventListener("click", clearSearch);
   emptyBoxClear.addEventListener("click", clearSearch);
+}
+
+/**
+ * populates the three filter dropdowns (file type, category, streamable)
+ * from whichever values are actually present across the rendered datasets,
+ * and wires each one to re-run applyDatasetFilter on change.
+ *
+ * Field mapping used, based on the actual dataset row shape returned by
+ * /retrieve-datasets (api/routes/dataset.py): "file type" -> dataset.format,
+ * "streamable or not" -> dataset.streamable (bool). There's no first-class
+ * "category" column on a dataset — categories are a separate table
+ * (name/url via /retrieve-categories) and a dataset belongs to one if its
+ * freeform "tags" array happens to contain that category's url, the same
+ * lookup /datasets/catalog already does server-side. So the category
+ * dropdown is built from real categories, restricted to ones actually
+ * used by a tag on a rendered dataset (no dead options).
+ * @param {Array<Object>} datasets
+ * @param {Array<Object>} categories
+ */
+function initDatasetFilters(datasets, categories) {
+  const formatSelect = document.querySelector("#dataset-filter-format");
+  const categorySelect = document.querySelector("#dataset-filter-category");
+  const streamableSelect = document.querySelector("#dataset-filter-streamable");
+  if (!formatSelect || !categorySelect || !streamableSelect || datasets.length === 0) {
+    return;
+  }
+
+  const formatValues = new Set();
+  const usedCategoryUrls = new Set();
+  datasets.forEach((dataset) => {
+    if (dataset["format"]) {
+      formatValues.add(dataset["format"]);
+    }
+    (dataset["tags"] || []).forEach((tag) => usedCategoryUrls.add(tag));
+  });
+
+  Array.from(formatValues).sort().forEach((value) => {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    formatSelect.appendChild(option);
+  });
+
+  categories
+    .filter((category) => usedCategoryUrls.has(category["url"]))
+    .sort((a, b) => a["name"].localeCompare(b["name"]))
+    .forEach((category) => {
+      const option = document.createElement("option");
+      option.value = category["url"];
+      option.textContent = category["name"];
+      categorySelect.appendChild(option);
+    });
+
+  [formatSelect, categorySelect, streamableSelect].forEach((select) => {
+    select.addEventListener("change", () => applyDatasetFilter());
+  });
 }
 
 /**
@@ -235,6 +314,9 @@ function addDatasetCard(dataset) {
     const container = document.querySelector(".dataset-card-container");
     newCard.className = "dataset-card";
     newCard.dataset.searchText = `${dataset.name} ${dataset.description}`.toLowerCase();
+    newCard.dataset.format = dataset["format"] || "";
+    newCard.dataset.streamable = Boolean(dataset["streamable"]);
+    newCard.dataset.tags = (dataset["tags"] || []).join("|");
     newCard.innerHTML = /* html */ `
             <div class="dataset-card-top">
                 <div class="dataset-card-header">
