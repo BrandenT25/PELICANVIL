@@ -200,34 +200,90 @@ def _run_download_job(job_id: str, history_id: int, destination: str, paths: lis
     _finish_history_record(history_id, final_status, error_message, history_files)
 
 
+def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str]) -> str:
+    # Shared by startDownloadJob and restartDownloadRecord below — both boil
+    # down to "create a download_jobs row and hand the actual transfer off to
+    # a background thread", they just differ in how the history_id/paths they
+    # pass in were obtained. Submitting to the pool just enqueues the call and
+    # returns immediately — the actual transfer work happens on whichever
+    # worker thread picks it up, entirely off the request that called this.
+    job_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc).isoformat()
+    files = [{"path": p, "status": "pending"} for p in paths]
+    with _db_write_lock:
+        con = _get_connection()
+        cur = con.cursor()
+        cur.execute(
+            "INSERT INTO download_jobs (job_id, history_id, name, destination, status, item_count, files, started_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
+            (job_id, history_id, name, destination, len(paths), json.dumps(files), now, now),
+        )
+        con.commit()
+        con.close()
+    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths)
+    return job_id
+
+
 @downloadsRouter.post("/datasets/download/start")
 async def startDownloadJob(payload: DownloadJobStart):
     if not payload.paths:
         raise HTTPException(status_code=400, detail="Select at least one file or folder first.")
 
     history_id = _create_history_record(payload.name, payload.destination, len(payload.paths))
+    job_id = _enqueue_job(history_id, payload.name, payload.destination, payload.paths)
 
-    job_id = uuid.uuid4().hex
-    now = datetime.now(timezone.utc).isoformat()
-    files = [{"path": p, "status": "pending"} for p in payload.paths]
+    return {"job_id": job_id, "history_id": history_id, "status": "pending"}
+
+
+@downloadsRouter.post("/downloads/history/{record_id}/restart")
+async def restartDownloadRecord(record_id: int):
+    # Retries only the files that actually failed last time, using the same
+    # name/destination the original download used — reuses _enqueue_job and
+    # _run_download_job unchanged, since the actual transfer logic doesn't
+    # need to know or care whether this is a first attempt or a retry.
+    #
+    # What's genuinely different from startDownloadJob, and why this isn't
+    # just a call to it: restarting is expected to update the *same* history
+    # entry in place (status flips failed -> in_progress on the entry the
+    # user clicked Restart on), not create a second entry while the failed
+    # one lingers. startDownloadJob always inserts a fresh history row, so it
+    # can't produce that in-place behavior — this endpoint resets the
+    # existing row instead of inserting a new one.
+    con = _get_connection()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM download_history WHERE id = ?", (record_id,))
+    row = cur.fetchone()
+    con.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Download record not found.")
+    if row["status"] != "failed":
+        raise HTTPException(status_code=400, detail="Only failed downloads can be restarted.")
+
+    files = json.loads(row["files"]) if row["files"] else []
+    paths = [f["path"] for f in files if f.get("status") == "failed"]
+    if not paths:
+        raise HTTPException(status_code=400, detail="No failed files recorded for this download.")
+
+    name = row["name"]
+    destination = row["destination"]
+    started_at = datetime.now(timezone.utc).isoformat()
     with _db_write_lock:
         con = _get_connection()
         cur = con.cursor()
         cur.execute(
-            "INSERT INTO download_jobs (job_id, history_id, name, destination, status, item_count, files, started_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-            (job_id, history_id, payload.name, payload.destination, len(payload.paths), json.dumps(files), now, now),
+            "UPDATE download_history SET status = 'in_progress', item_count = ?, started_at = ?, finished_at = NULL, error_message = NULL, files = NULL WHERE id = ?",
+            (len(paths), started_at, record_id),
         )
+        # the finished job row from the original attempt is still sitting
+        # there pointed at this history_id — drop it before inserting the new
+        # one so /downloads/history's LEFT JOIN doesn't pick up both and
+        # duplicate this entry in the list
+        cur.execute("DELETE FROM download_jobs WHERE history_id = ?", (record_id,))
         con.commit()
         con.close()
 
-    # Submitting to the pool just enqueues the call and returns immediately —
-    # the actual transfer work happens on whichever worker thread picks it up,
-    # entirely off this request. This is the entire fix: this handler now
-    # does a couple of fast local DB writes and returns, regardless of how
-    # large or how many files are in the batch.
-    _job_executor.submit(_run_download_job, job_id, history_id, payload.destination, payload.paths)
+    job_id = _enqueue_job(record_id, name, destination, paths)
 
-    return {"job_id": job_id, "history_id": history_id, "status": "pending"}
+    return {"job_id": job_id, "history_id": record_id, "status": "in_progress"}
 
 
 @downloadsRouter.get("/datasets/download/status/{job_id}")

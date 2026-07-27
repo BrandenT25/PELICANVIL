@@ -84,18 +84,46 @@ async function deleteDownloadRecord(id) {
   }
 }
 
+/**
+ * POSTs to restart a failed download record — same normalize-the-result
+ * shape as deleteDownloadRecord above.
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function restartDownloadRecord(id) {
+  try {
+    const response = await fetch(`${window.ROOT_PATH}/downloads/history/${id}/restart`, { method: "POST" });
+    if (!response.ok) {
+      let detail = `HTTP error! status ${response.status}`;
+      try {
+        const body = await response.json();
+        if (body && body.detail) detail = body.detail;
+      } catch (_) {}
+      return { ok: false, error: detail };
+    }
+    return { ok: true };
+  } catch (error) {
+    console.log("restarting download record failed", error);
+    return { ok: false, error: "Couldn't reach the server. Try again." };
+  }
+}
+
 function renderEntry(entry) {
   const card = document.createElement("div");
   card.className = "downloads-entry";
 
   const itemsLabel = `${entry.item_count} item${entry.item_count === 1 ? "" : "s"}`;
   const showOodLink = entry.status === "complete" || entry.status === "partial";
+  const showRestart = entry.status === "failed";
 
   card.innerHTML = /* html */ `
     <div class="downloads-entry-top">
       <span class="downloads-entry-name">${escapeHtml(entry.name)}</span>
       <div class="downloads-entry-top-right">
         <span class="downloads-entry-status downloads-entry-status-${entry.status}">${statusLabel(entry.status)}</span>
+        ${showRestart ? `
+        <button class="downloads-entry-restart" title="Restart this failed download" aria-label="Restart download">
+          <i class="fa fa-refresh"></i> Restart
+        </button>` : ""}
         <button class="downloads-entry-delete" title="Delete this download from history" aria-label="Delete download record">
           <i class="fa fa-trash"></i>
         </button>
@@ -111,6 +139,29 @@ function renderEntry(entry) {
     <div class="downloads-entry-files-slot">${renderFileList(entry.files)}</div>
     ${showOodLink ? `<a class="downloads-entry-ood-link" href="${buildOodUrl(entry.destination)}" target="_blank" rel="noopener noreferrer"><i class="fa fa-external-link"></i> Open in File Browser</a>` : ""}
   `;
+
+  const restartBtn = card.querySelector(".downloads-entry-restart");
+  if (restartBtn) {
+    restartBtn.addEventListener("click", async () => {
+      restartBtn.disabled = true;
+      const result = await restartDownloadRecord(entry.id);
+      if (!result.ok) {
+        showToast(result.error || "Couldn't restart this download. Try again.", "error");
+        restartBtn.disabled = false;
+        return;
+      }
+      showToast("Download restarted.", "success");
+      // the restart happened in place server-side (same history_id, status
+      // now in_progress with a fresh job_id) — reload the whole list rather
+      // than hand-patching this card's badge/meta/files locally, since a
+      // restart changes enough fields (item_count, started_at, files, the
+      // job_id backing polling) that reloading is simpler and can't drift
+      // from what the server actually did. loadDownloadHistory also already
+      // knows to start polling any in_progress row it finds, so the new job
+      // picks up live per-file updates same as a fresh download would.
+      loadDownloadHistory();
+    });
+  }
 
   const deleteBtn = card.querySelector(".downloads-entry-delete");
   deleteBtn.addEventListener("click", async () => {
