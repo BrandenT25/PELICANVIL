@@ -1,9 +1,10 @@
 from fastapi import FastAPI, Request, HTTPException
 import os
+from datetime import date
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from api.routes.dataset import datasetRouter
+from api.routes.dataset import datasetRouter, buildCatalog
 from api.routes.pelican import pelicanRouter
 from api.routes.local import localRouter
 from api.routes.database import dbRouter
@@ -33,7 +34,19 @@ async def dataset_page(request: Request):
 
 @app.get('/', response_class=HTMLResponse)
 async def main_page(request: Request):
-    return templates.TemplateResponse(request, "index.html", {"ROOT_URL": request.scope.get('root_path', '')})
+    # dataset_count/category_count/category_names come from the same
+    # dataset<->category tag matching /datasets/catalog already exposes —
+    # two small SELECT * queries, cheap enough to run on every homepage
+    # load. If the dataset table grows large enough for this to matter,
+    # revisit once the separate local-indexing/caching item is built.
+    catalog = buildCatalog()
+    return templates.TemplateResponse(request, "index.html", {
+        "ROOT_URL": request.scope.get('root_path', ''),
+        "dataset_count": catalog["dataset_count"],
+        "category_count": catalog["category_count"],
+        "category_names": catalog["category_names"],
+        "today": date.today().strftime("%B %d, %Y"),
+    })
 
 @app.get('/quick-access', response_class=HTMLResponse)
 async def main_page(request: Request):

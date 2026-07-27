@@ -71,6 +71,12 @@
             </div>
         </aside>
     </main>
+    <section class="dataset-overview">
+        <i class="ti ti-database dataset-overview-icon"></i>
+        <p class="dataset-overview-text">
+            As of {{ today }}, there are <strong>{{ dataset_count }}</strong> publicly available dataset{{ "" if dataset_count == 1 else "s" }} across <strong>{{ category_count }}</strong> categor{{ "y" if category_count == 1 else "ies" }}{% if category_names %}: {{ category_names|join(", ") }}{% endif %}.
+        </p>
+    </section>
     <section class="pelican-credit">
         <h2 class="pelican-credit-title">Powered by Pelican</h2>
         <p class="pelican-credit-description">pelican-ui is built on top of the <a class="pelican-credit-link" href="https://pelicanplatform.org/" target="_blank" rel="noopener">Pelican Platform</a>, the open-source data federation software behind the Open Science Data Federation.</p>

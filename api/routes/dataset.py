@@ -32,8 +32,12 @@ async def serveDatasets():
         result.append(current_row)
     return result
 
-@datasetRouter.get("/datasets/catalog")
-async def serveCatalog():
+def buildCatalog():
+    """
+    Shared by /datasets/catalog and the homepage overview section — both need
+    the same dataset_count / category_count / category_names derived from the
+    same tag<->category.url matching, so this is the one place that logic lives.
+    """
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     cur = con.cursor()
@@ -67,6 +71,10 @@ async def serveCatalog():
         "category_names": sorted(category_names_used),
         "datasets": catalog,
     }
+
+@datasetRouter.get("/datasets/catalog")
+async def serveCatalog():
+    return buildCatalog()
 
 @datasetRouter.get("/retrieve-categories")
 async def serveCategories():
