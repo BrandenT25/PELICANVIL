@@ -113,7 +113,10 @@ function renderEntry(entry) {
 
   const itemsLabel = `${entry.item_count} item${entry.item_count === 1 ? "" : "s"}`;
   const showOodLink = entry.status === "complete" || entry.status === "partial";
-  const showRestart = entry.status === "failed";
+  // "failed" (every file failed) and "partial" (some succeeded, some
+  // failed) both have failed files worth retrying — the restart endpoint
+  // handles both, only retrying the failed subset either way
+  const showRestart = entry.status === "failed" || entry.status === "partial";
 
   card.innerHTML = /* html */ `
     <div class="downloads-entry-top">
@@ -121,7 +124,7 @@ function renderEntry(entry) {
       <div class="downloads-entry-top-right">
         <span class="downloads-entry-status downloads-entry-status-${entry.status}">${statusLabel(entry.status)}</span>
         ${showRestart ? `
-        <button class="downloads-entry-restart" title="Restart this failed download" aria-label="Restart download">
+        <button class="downloads-entry-restart" title="Retry the failed files in this download" aria-label="Restart download">
           <i class="fa fa-refresh"></i> Restart
         </button>` : ""}
         <button class="downloads-entry-delete" title="Delete this download from history" aria-label="Delete download record">

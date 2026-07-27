@@ -152,7 +152,7 @@ def _update_job(job_id: str, status: str | None = None, files: list[dict] | None
         con.close()
 
 
-def _run_download_job(job_id: str, history_id: int, destination: str, paths: list[str]) -> None:
+def _run_download_job(job_id: str, history_id: int, destination: str, paths: list[str], preserved_files: list[dict] | None = None) -> None:
     # Runs on a background thread from _job_executor — this function is what
     # actually replaces the old request-held-open behavior. It reuses
     # download_one_file (api/routes/pelican.py) unchanged; only where it's
@@ -196,11 +196,31 @@ def _run_download_job(job_id: str, history_id: int, destination: str, paths: lis
 
     _update_job(job_id, status=final_status, files=files, error_message=error_message)
 
-    history_files = [{"path": f["path"], "status": "succeeded" if f["status"] == "succeeded" else "failed"} for f in files]
-    _finish_history_record(history_id, final_status, error_message, history_files)
+    # preserved_files carries over files that already succeeded on a prior
+    # attempt when this job is retrying just the failed subset of a
+    # partial/failed download (see restartDownloadRecord) — merge them back
+    # in so the finished history record reflects the dataset's full file set
+    # rather than only whatever was retried this run. When this isn't a
+    # restart, preserved_files is empty, so combined_files/history_status end
+    # up identical to the this-run-only values above and single-shot
+    # downloads are unaffected.
+    combined_files = (preserved_files or []) + files
+    combined_failed_count = sum(1 for f in combined_files if f["status"] != "succeeded")
+    if combined_failed_count == 0:
+        history_status = "complete"
+        history_error_message = None
+    elif combined_failed_count == len(combined_files):
+        history_status = "failed"
+        history_error_message = f"{combined_failed_count} of {len(combined_files)} item(s) failed to download."
+    else:
+        history_status = "partial"
+        history_error_message = f"{combined_failed_count} of {len(combined_files)} item(s) failed to download."
+
+    history_files = [{"path": f["path"], "status": "succeeded" if f["status"] == "succeeded" else "failed"} for f in combined_files]
+    _finish_history_record(history_id, history_status, history_error_message, history_files)
 
 
-def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str]) -> str:
+def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str], preserved_files: list[dict] | None = None) -> str:
     # Shared by startDownloadJob and restartDownloadRecord below — both boil
     # down to "create a download_jobs row and hand the actual transfer off to
     # a background thread", they just differ in how the history_id/paths they
@@ -219,7 +239,7 @@ def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str])
         )
         con.commit()
         con.close()
-    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths)
+    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths, preserved_files)
     return job_id
 
 
@@ -240,11 +260,15 @@ async def restartDownloadRecord(record_id: int):
     # name/destination the original download used — reuses _enqueue_job and
     # _run_download_job unchanged, since the actual transfer logic doesn't
     # need to know or care whether this is a first attempt or a retry.
+    # Works for both "failed" (every file failed) and "partial" (some
+    # succeeded, some failed) records; for partial, the already-succeeded
+    # files are carried through as preserved_files rather than re-downloaded
+    # or dropped from history — see the comment in _run_download_job.
     #
     # What's genuinely different from startDownloadJob, and why this isn't
     # just a call to it: restarting is expected to update the *same* history
-    # entry in place (status flips failed -> in_progress on the entry the
-    # user clicked Restart on), not create a second entry while the failed
+    # entry in place (status flips failed/partial -> in_progress on the entry
+    # the user clicked Restart on), not create a second entry while the old
     # one lingers. startDownloadJob always inserts a fresh history row, so it
     # can't produce that in-place behavior — this endpoint resets the
     # existing row instead of inserting a new one.
@@ -255,23 +279,25 @@ async def restartDownloadRecord(record_id: int):
     con.close()
     if row is None:
         raise HTTPException(status_code=404, detail="Download record not found.")
-    if row["status"] != "failed":
-        raise HTTPException(status_code=400, detail="Only failed downloads can be restarted.")
+    if row["status"] not in ("failed", "partial"):
+        raise HTTPException(status_code=400, detail="Only failed or partially-failed downloads can be restarted.")
 
-    files = json.loads(row["files"]) if row["files"] else []
-    paths = [f["path"] for f in files if f.get("status") == "failed"]
-    if not paths:
+    all_files = json.loads(row["files"]) if row["files"] else []
+    retry_paths = [f["path"] for f in all_files if f.get("status") == "failed"]
+    preserved_files = [f for f in all_files if f.get("status") == "succeeded"]
+    if not retry_paths:
         raise HTTPException(status_code=400, detail="No failed files recorded for this download.")
 
     name = row["name"]
     destination = row["destination"]
+    total_item_count = len(preserved_files) + len(retry_paths)
     started_at = datetime.now(timezone.utc).isoformat()
     with _db_write_lock:
         con = _get_connection()
         cur = con.cursor()
         cur.execute(
             "UPDATE download_history SET status = 'in_progress', item_count = ?, started_at = ?, finished_at = NULL, error_message = NULL, files = NULL WHERE id = ?",
-            (len(paths), started_at, record_id),
+            (total_item_count, started_at, record_id),
         )
         # the finished job row from the original attempt is still sitting
         # there pointed at this history_id — drop it before inserting the new
@@ -281,7 +307,7 @@ async def restartDownloadRecord(record_id: int):
         con.commit()
         con.close()
 
-    job_id = _enqueue_job(record_id, name, destination, paths)
+    job_id = _enqueue_job(record_id, name, destination, retry_paths, preserved_files=preserved_files)
 
     return {"job_id": job_id, "history_id": record_id, "status": "in_progress"}
 
