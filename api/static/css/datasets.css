@@ -883,6 +883,19 @@ clamp(s_1px, calc(b + (m*100)vw), s_2px)
     white-space: nowrap;
     font-family: Poppins, sans-serif;
 }
+.file-size-box.file-size-unavailable{
+    color: #666;
+    font-style: italic;
+    font-size: clamp(0.7rem, 0.66rem + 0.14vw, 0.76rem);
+}
+
+.dataset-meta-size{
+    color: #cfb991;
+}
+.dataset-meta-size-unavailable{
+    color: #777;
+    font-style: italic;
+}
 /* #endregion */
 
 /* #region Local Folder Browse Modal */

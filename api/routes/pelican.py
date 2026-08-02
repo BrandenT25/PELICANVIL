@@ -3,9 +3,10 @@ from pelicanfs import OSDFFileSystem
 from pelicanfs.exceptions import NoCredentialsException
 from aiowebdav2.exceptions import UnauthorizedError, AccessDeniedError
 import aiohttp
-import fsspec, os, json, shutil, logging
+import fsspec, os, json, shutil, logging, sqlite3
 from pathlib import Path
 from collections import defaultdict
+from api.core.config import DB_PATH
 from api.core.pelican_auth import get_token_for_namespace, log_unexpected_pelican_error
 osdf = OSDFFileSystem(direct_reads=False)
 
@@ -54,6 +55,49 @@ def _is_auth_required(exc: Exception) -> bool:
     if isinstance(exc, (UnauthorizedError, AccessDeniedError)):
         return True
     return isinstance(exc, aiohttp.ClientResponseError) and exc.status in (401, 403)
+
+
+def _attach_folder_sizes(entries: list) -> list:
+    """Annotates each directory entry in a .ls() result with real_size (an
+    int, from the indexing worker's dataset_folder_sizes table) when known,
+    else None. Keyed purely by path, not dataset id — quick-access.js's file
+    browser has no dataset entity at all (just a pasted path), so a
+    dataset-scoped lookup wouldn't work for it; this is the one place both
+    datasets.js's and quick-access.js's file browsers get real folder sizes
+    from, since both already call this same route.
+
+    Batches into a single query rather than one per directory entry. Table
+    may not exist yet on a fresh deployment (the worker creates it lazily on
+    its first successful run, see scripts/indexing_worker.py) — that's not
+    an error, it just means nothing is indexed yet, so every entry gets
+    real_size: None.
+    """
+    dir_paths = [e["name"].rstrip("/") for e in entries if e.get("type") == "directory"]
+    if not dir_paths:
+        return entries
+
+    sizes: dict[str, int] = {}
+    try:
+        con = sqlite3.connect(DB_PATH)
+        try:
+            placeholders = ",".join("?" * len(dir_paths))
+            cur = con.cursor()
+            cur.execute(
+                f"SELECT folder_path, size_bytes FROM dataset_folder_sizes WHERE folder_path IN ({placeholders})",
+                dir_paths,
+            )
+            sizes = dict(cur.fetchall())
+        finally:
+            con.close()
+    except sqlite3.OperationalError:
+        # table doesn't exist yet (nothing has ever finished indexing) —
+        # every entry just stays real_size: None below, not an error
+        pass
+
+    for entry in entries:
+        if entry.get("type") == "directory":
+            entry["real_size"] = sizes.get(entry["name"].rstrip("/"))
+    return entries
 
 
 class DownloadError(Exception):
@@ -106,7 +150,7 @@ def download_one_file(filepath: str, storage_location: str) -> None:
 def pelicanlistPath(path: str):
     fs = _resolve_filesystem(path)
     try:
-        return fs.ls(path)
+        return _attach_folder_sizes(fs.ls(path))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f'Path "{path}" was not found on the federation.')
     except Exception as e:

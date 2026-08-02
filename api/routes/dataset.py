@@ -9,6 +9,25 @@ DATASET_PATH = os.path.join(ROOTPATH, "data", "datasets.json")
 CATEGORY_PATH = os.path.join(ROOTPATH, "data", "categories.json")
 datasetRouter = APIRouter()
 
+def _indexed_sizes_by_path() -> dict:
+    """dataset.path -> total size in bytes, from the indexing worker's
+    dataset_folder_sizes table — a dataset's own row (folder_path == its own
+    root path) already *is* the recursive total, see
+    scripts/indexing_worker.py's _write_folder_sizes. Table may not exist
+    yet on a fresh deployment (created lazily on the worker's first
+    successful run) — that's not an error, just "nothing indexed yet"."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        try:
+            cur = con.cursor()
+            cur.execute("SELECT folder_path, size_bytes FROM dataset_folder_sizes")
+            return dict(cur.fetchall())
+        finally:
+            con.close()
+    except sqlite3.OperationalError:
+        return {}
+
+
 @datasetRouter.get("/retrieve-datasets")
 async def serveDatasets():
     result = []
@@ -18,6 +37,7 @@ async def serveDatasets():
     cur.execute('SELECT * FROM datasets')
     rows = cur.fetchall()
     con.close()
+    indexed_sizes = _indexed_sizes_by_path()
     for row in rows:
         current_row = {
             "id": row["id"],
@@ -27,7 +47,8 @@ async def serveDatasets():
             "format": row["format"],
             "streamable": bool(row["streamable"]),
             "access": row["access"],
-            "tags" : json.loads(row["tags"])
+            "tags" : json.loads(row["tags"]),
+            "indexed_size_bytes": indexed_sizes.get(row["path"].rstrip("/")),
         }
         result.append(current_row)
     return result

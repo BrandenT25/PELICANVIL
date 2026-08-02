@@ -627,6 +627,11 @@
     white-space: nowrap;
     font-family: Poppins, sans-serif;
 }
+.file-size-box.file-size-unavailable{
+    color: #666;
+    font-style: italic;
+    font-size: 0.65rem;
+}
 
 /* #endregion */
 

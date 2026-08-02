@@ -30,6 +30,17 @@
 .toast-success {
   border-left-color: #5fae7d;
 }
+/* In-progress is a third state alongside toast.js's existing success/error
+   (amber, matching the "still working" color already used for indexing
+   status in admin.css) — used only by the persistent download-progress
+   toast (see showProgressToast in datasets.js/quick-access.js), removed
+   again once the download reaches a terminal state. */
+.toast-inprogress {
+  border-left-color: #d9a441;
+}
+.toast-inprogress .toast-icon {
+  color: #d9a441;
+}
 .toast-icon {
   flex-shrink: 0;
   margin-top: 2px;
@@ -77,4 +88,35 @@
 }
 .toast-close:hover {
   color: #f5f5f5;
+}
+
+.toast-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.toast-progress-track {
+  width: 100%;
+  height: 4px;
+  border-radius: 999px;
+  background-color: #333;
+  overflow: hidden;
+}
+.toast-progress-fill {
+  height: 100%;
+  width: 0%;
+  background-color: #d9a441;
+  border-radius: 999px;
+  transition: width 0.3s ease;
+}
+.toast-success .toast-progress-fill {
+  background-color: #5fae7d;
+}
+.toast-error .toast-progress-fill {
+  background-color: #e24b4a;
+}
+.toast-progress-label {
+  color: #999;
+  font-family: Poppins, sans-serif;
+  font-size: 0.72rem;
 }

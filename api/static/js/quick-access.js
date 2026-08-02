@@ -295,6 +295,7 @@ function buildBrowser(path){
     file_container.downloadPaths = new Map();
     file_container.downloadAmount = file_container.downloadPaths.size;
     file_container.downloadSize = 0;
+    file_container.unknownSizeSelections = 0;
     file_container.selectAllCheckbox = selectAllCheckbox;
     loadDirectory(path, file_container, breadcrumbs, download_card)
 
@@ -313,6 +314,7 @@ function buildBrowser(path){
       file_container.downloadPaths.clear()
       updateSelectionAmountBox(file_container, downloadAmount)
       file_container.downloadSize = 0
+      file_container.unknownSizeSelections = 0
       loadDirectory(
             file_container.currentPath,
             file_container,
@@ -368,37 +370,33 @@ async function makeFolderCards(path, container, download_card, breadcrumbs, isRe
     const nameWithBreaks = name.replace(/_/g, "_<wbr>");
     const newCard = document.createElement("div");
     let imageFile;
-    let fileSize;
-    let fileSizeType;
-    let fileBytes = 0
+    let fileBytes = 0;
+    // Whether we actually know this entry's size. Always true for files
+    // (pelicanfs returns real per-file sizes). For directories, only true
+    // once the indexing worker has recorded a real recursive total for this
+    // exact path (folder_path.real_size, attached server-side in
+    // pelicanlistPath — see api/routes/pelican.py's _attach_folder_sizes) —
+    // never fall back to the old fixed ~4096 directory-entry size, since
+    // that was never a real content size to begin with.
+    let sizeKnown = true;
+    let sizeLabel = "";
     if (folder_path["type"] === "directory") {
       imageFile = "folder-icon.png";
-      fileSizeType = ""
-      console.log(folder_path)
-      fileSize = ""
+      if (folder_path["real_size"] === null || folder_path["real_size"] === undefined) {
+        sizeKnown = false;
+      } else {
+        fileBytes = folder_path["real_size"];
+        sizeLabel = formatBytes(fileBytes);
+      }
     } else {
       fileBytes = folder_path["size"];
-      fileSize = folder_path["size"];
-      if (fileSize > 1000000000) {
-        fileSize = fileSize / 1000000000;
-        fileSize = truncateDecimals(fileSize, 1);
-        fileSizeType = "Gb"
-      } else if (fileSize > 1000000) {
-        fileSize = fileSize / 1000000;
-        fileSizeType = "Mb"
-        fileSize = truncateDecimals(fileSize, 1);
-        console.log(fileSize, "MB");
-      } else if (fileSize > 1000) {
-        fileSize = fileSize / 1000;
-        fileSize = truncateDecimals(fileSize, 1);
-        fileSizeType = "Kb"
-      }
+      sizeLabel = formatBytes(fileBytes);
       imageFile = "file-icon.png";
     }
 
     newCard.className = "file-browser-directory-folder";
     newCard.dataset.path = folder_path.name;
-    
+
     newCard.innerHTML = `
         <label class="folder-checkbox-wrapper">
             <input type="checkbox" class="folder-checkbox"></input>
@@ -406,7 +404,7 @@ async function makeFolderCards(path, container, download_card, breadcrumbs, isRe
         </label>
         <div class="icon-size-stack">
           <img src="${window.ROOT_PATH}/api/static/img/${imageFile}" alt="folder-icon" height="20"></img>
-          ${folder_path["type"] === "directory" ? "" : `<div class="file-size-box">${fileSize}${fileSizeType}</div>`}
+          ${sizeKnown ? `<div class="file-size-box">${sizeLabel}</div>` : `<div class="file-size-box file-size-unavailable">Size unavailable</div>`}
         </div>
         <div class="folder-info-stack">
           <div class="folder-name-box" title="${name}">
@@ -436,12 +434,14 @@ async function makeFolderCards(path, container, download_card, breadcrumbs, isRe
     checkBox.disabled = Boolean(coveringAncestor) && !isDirectlySelected;
     checkBox.addEventListener("change", (event) => {
       if (event.target.checked) {
-        container.downloadPaths.set(folder_path.name, folder_path.type);
+        container.downloadPaths.set(folder_path.name, { type: folder_path.type, size: fileBytes, sizeKnown });
         container.downloadSize += fileBytes;
+        if (!sizeKnown) container.unknownSizeSelections = (container.unknownSizeSelections || 0) + 1;
         updateSelectionAmountBox(container, download_card);
       } else {
         container.downloadPaths.delete(folder_path.name);
         container.downloadSize -= fileBytes;
+        if (!sizeKnown) container.unknownSizeSelections = Math.max(0, (container.unknownSizeSelections || 0) - 1);
         updateSelectionAmountBox(container, download_card);
       }
     });
@@ -522,9 +522,6 @@ function download_file(container, download_paths, sourceName) {
     );
     const download_card = staticMediumWrapper.querySelector(
       ".directory-download-container",
-    );
-    const downloadResult = staticMediumWrapper.querySelector(
-      ".directory-download-result",
     );
     const downloadButton = download_card.querySelector(
       ".directory-download-button",
@@ -638,15 +635,15 @@ function download_file(container, download_paths, sourceName) {
       }
 
       // hand off immediately rather than making the user babysit this modal —
-      // the download keeps running in the background and reports its outcome
-      // via a second toast (from renderDownloadResult below) when it's done
+      // the download keeps running in the background; a persistent toast
+      // (stays open through completion, manually dismissed — see
+      // showProgressToast) tracks it instead of this now-closed modal
       closeSelector(fileSelectorOverlay);
-      showToast("Download started.", "success", 6000, {
-        action: { label: "View Downloads", href: `${window.ROOT_PATH}/downloads` },
-      });
+      const sizeInfo = summarizeSelectionSizes(download_paths);
+      const progressToast = showProgressToast(sourceName || mediumDirectory.downloadPath, sizeInfo);
 
-      const result = await downloadFromPath(mediumDirectory.downloadPath, download_paths, sourceName);
-      renderDownloadResult(downloadResult, result);
+      const result = await downloadFromPath(mediumDirectory.downloadPath, download_paths, sourceName, progressToast.update);
+      progressToast.finish(result);
     });
     fileSelectorOverlay.appendChild(fileSelector);
     fileSelectorOverlay.classList.add("show");
@@ -804,33 +801,45 @@ function showTokenAuthModal(namespace, onRetry, initialError = "") {
 
 function updateSelectionAmountBox(container, download_card) {
   container.downloadAmount = container.downloadPaths.size;
-  let fileSize = container.downloadSize
-  let fileSizeType = ""
-  if (fileSize > 1000000000) {
-    fileSize = fileSize / 1000000000;
-    fileSize = truncateDecimals(fileSize, 1);
-    fileSizeType = "Gb"
-  } else if (fileSize > 1000000) {
-    fileSize = fileSize / 1000000;
-    fileSizeType = "Mb"
-    fileSize = truncateDecimals(fileSize, 1);
-    console.log(fileSize, "MB");
-  } else if (fileSize > 1000) {
-    fileSize = fileSize / 1000;
-    fileSize = truncateDecimals(fileSize, 1);
-    fileSizeType = "Kb"
-  }
+  const sizeLabel = formatBytes(container.downloadSize);
+  // container.unknownSizeSelections tracks how many currently-selected
+  // folders have no real indexed size (see the checkbox handler in
+  // makeFolderCards) — surfaced here so the total visibly reads as
+  // incomplete instead of silently under-counting those folders as 0 bytes.
+  const unknownSuffix = container.unknownSizeSelections > 0 ? " + unknown" : "";
   if (container.downloadAmount === 0){
     download_card.innerHTML = ``
   } else if (container.downloadAmount === 1) {
     download_card.innerHTML = `
-        <span>${container.downloadAmount} item selected | ${fileSize}${fileSizeType}</span>
+        <span>${container.downloadAmount} item selected | ${sizeLabel}${unknownSuffix}</span>
     `;
   } else {
     download_card.innerHTML = `
-        <span>${container.downloadAmount} items selected | ${fileSize}${fileSizeType}</span>
+        <span>${container.downloadAmount} items selected | ${sizeLabel}${unknownSuffix}</span>
     `;
   }
+}
+
+/**
+ * bytes -> a short human label ("4.2Gb", "830Kb", "512"), matching the
+ * threshold/rounding convention already used for individual file sizes.
+ * @param {number} bytes
+ * @returns {string}
+ */
+function formatBytes(bytes) {
+  let value = bytes;
+  let unit = "";
+  if (value > 1000000000) {
+    value = truncateDecimals(value / 1000000000, 1);
+    unit = "Gb";
+  } else if (value > 1000000) {
+    value = truncateDecimals(value / 1000000, 1);
+    unit = "Mb";
+  } else if (value > 1000) {
+    value = truncateDecimals(value / 1000, 1);
+    unit = "Kb";
+  }
+  return `${value}${unit}`;
 }
 
 async function makeLocalDirectoryCards(root, path = "", browseLocalDirectoryContainer, mediumLabel, downloadLocationLabel){
@@ -907,9 +916,13 @@ const DOWNLOAD_TERMINAL_STATUSES = ["complete", "partial", "failed"];
  * @param {string} file - medium + subfolder path, e.g. "project/x-abc/data"
  * @param {Map<string,string>} paths - path -> type, from container.downloadPaths
  * @param {string} [sourceName] - human-readable name of what's being downloaded
+ * @param {(status: Object) => void} [onTick] - called with each polled job
+ *   status (including the initial "pending" one) so a caller can drive a
+ *   live progress toast off the exact same poll loop, rather than running a
+ *   second one just for the toast (see showProgressToast below)
  * @returns {Promise<{succeeded: string[], failed: string[], destination: string, oodUrl: string}>}
  */
-async function downloadFromPath(file, paths, sourceName) {
+async function downloadFromPath(file, paths, sourceName, onTick) {
   const parts = file.split("/");
   const root = parts[0];
   const resolved_root = rootPaths[root];
@@ -934,8 +947,8 @@ async function downloadFromPath(file, paths, sourceName) {
     return { succeeded: [], failed: pathList, destination: fullPath, oodUrl };
   }
 
-  const status = await pollDownloadJob(job.job_id);
-  return await resolveDownloadAuth(status, job.history_id, fullPath, oodUrl);
+  const status = await pollDownloadJob(job.job_id, onTick);
+  return await resolveDownloadAuth(status, job.history_id, fullPath, oodUrl, false, onTick);
 }
 
 /**
@@ -943,10 +956,12 @@ async function downloadFromPath(file, paths, sourceName) {
  * status or DOWNLOAD_POLL_MAX_ATTEMPTS is hit. Split out of downloadFromPath
  * so resolveDownloadAuth below can reuse it for polling a restarted job too.
  * @param {string} jobId
+ * @param {(status: Object) => void} [onTick]
  * @returns {Promise<Object>} the last job status payload received
  */
-async function pollDownloadJob(jobId) {
+async function pollDownloadJob(jobId, onTick) {
   let status = { status: "pending" };
+  if (onTick) onTick(status);
   for (let attempt = 0; attempt < DOWNLOAD_POLL_MAX_ATTEMPTS; attempt++) {
     if (DOWNLOAD_TERMINAL_STATUSES.includes(status.status)) break;
     await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_POLL_INTERVAL_MS));
@@ -956,6 +971,7 @@ async function pollDownloadJob(jobId) {
         throw new Error(`HTTP error! status ${response.status}`);
       }
       status = await response.json();
+      if (onTick) onTick(status);
     } catch (error) {
       // transient hiccup while polling — the job may still be completing
       // fine server-side, so keep trying rather than giving up on it
@@ -979,9 +995,10 @@ async function pollDownloadJob(jobId) {
  * @param {string} fullPath
  * @param {string} oodUrl
  * @param {boolean} [isRetry]
+ * @param {(status: Object) => void} [onTick]
  * @returns {Promise<{succeeded: string[], failed: string[], destination: string, oodUrl: string}>}
  */
-async function resolveDownloadAuth(status, historyId, fullPath, oodUrl, isRetry = false) {
+async function resolveDownloadAuth(status, historyId, fullPath, oodUrl, isRetry = false, onTick) {
   const files = status.files || [];
   const authFailure = files.find((f) => f.status !== "succeeded" && f.auth_required);
 
@@ -1003,8 +1020,8 @@ async function resolveDownloadAuth(status, historyId, fullPath, oodUrl, isRetry 
             resolve(buildDownloadResult(status, fullPath, oodUrl));
             return;
           }
-          const retryStatus = await pollDownloadJob(restartedJobId);
-          resolve(await resolveDownloadAuth(retryStatus, historyId, fullPath, oodUrl, true));
+          const retryStatus = await pollDownloadJob(restartedJobId, onTick);
+          resolve(await resolveDownloadAuth(retryStatus, historyId, fullPath, oodUrl, true, onTick));
         },
         isRetry ? "That token was rejected. Check it and try again." : "",
       );
@@ -1022,48 +1039,131 @@ function buildDownloadResult(status, fullPath, oodUrl) {
 }
 
 /**
- * Renders the outcome of downloadFromPath into the download modal and
- * raises a toast — success gets a link to open the destination in OOD's
- * file browser, failures get a specific-as-possible message.
- * @param {HTMLElement} container
- * @param {{succeeded: string[], failed: string[], destination: string, oodUrl: string}} result
+ * Builds a per-item path -> size lookup from the same Map download_file
+ * already has (container.downloadPaths, values shaped {type, size,
+ * sizeKnown} — see the checkbox handler in makeFolderCards), plus whether
+ * every selected item's size is actually known and their combined total.
+ * Kept separate from showProgressToast so the "can we do byte-accurate
+ * progress" decision is made once, from data that already exists, rather
+ * than re-derived per poll tick.
+ * @param {Map<string, {type: string, size: number, sizeKnown: boolean}>} download_paths
  */
-function renderDownloadResult(container, result) {
-  container.style.display = "flex";
-  const total = result.succeeded.length + result.failed.length;
-  const ood = /* html */ `
-    <a class="download-result-ood-link" href="${result.oodUrl}" target="_blank" rel="noopener noreferrer">
-      <i class="fa fa-external-link"></i> Open in File Browser
-    </a>
-  `;
+function summarizeSelectionSizes(download_paths) {
+  const sizeByPath = new Map();
+  let allSizesKnown = true;
+  let totalBytes = 0;
+  download_paths.forEach((info, path) => {
+    sizeByPath.set(path, info);
+    if (!info.sizeKnown) allSizesKnown = false;
+    totalBytes += info.size || 0;
+  });
+  return { sizeByPath, allSizesKnown: allSizesKnown && totalBytes > 0, totalBytes };
+}
 
-  if (result.failed.length === 0) {
-    container.innerHTML = /* html */ `
-      <div class="download-result download-result-success">
-        <i class="fa fa-check-circle"></i>
-        <span>Downloaded ${result.succeeded.length} item${result.succeeded.length === 1 ? "" : "s"} to ${result.destination}.</span>
-      </div>
-      ${ood}
-    `;
-    showToast(`Download complete — ${result.succeeded.length} item${result.succeeded.length === 1 ? "" : "s"} saved.`, "success");
-  } else if (result.succeeded.length === 0) {
-    container.innerHTML = /* html */ `
-      <div class="download-result download-result-error">
-        <i class="fa fa-exclamation-circle"></i>
-        <span>All ${result.failed.length} item${result.failed.length === 1 ? "" : "s"} failed to download. Check permissions on the destination and try again.</span>
-      </div>
-    `;
-    showToast("Download failed. Check permissions on the destination and try again.", "error");
-  } else {
-    container.innerHTML = /* html */ `
-      <div class="download-result download-result-error">
-        <i class="fa fa-exclamation-circle"></i>
-        <span>${result.succeeded.length} of ${total} items downloaded — ${result.failed.length} failed.</span>
-      </div>
-      ${ood}
-    `;
-    showToast(`${result.failed.length} of ${total} items failed to download.`, "error");
+/**
+ * Shows one persistent (manually-dismissed — toast.js already supports
+ * this via duration: 0, nothing added there) toast tracking a single
+ * download's live progress, replacing the old pair of separate
+ * auto-dismissing start/end toasts. update() is meant to be passed
+ * straight in as downloadFromPath's onTick, so this rides the exact same
+ * poll loop instead of running a second one just for the toast.
+ * @param {string} sourceName
+ * @param {{sizeByPath: Map, allSizesKnown: boolean, totalBytes: number}} sizeInfo
+ * @returns {{update: (status: Object) => void, finish: (result: Object) => void}}
+ */
+function showProgressToast(sourceName, sizeInfo) {
+  const toast = showToast(`Downloading "${sourceName}"…`, "success", 0);
+  // showToast's type param only has success/error — remove the success
+  // class it adds by default so the in-progress (amber) look below isn't
+  // beaten by .toast-success's higher-specificity fill-bar color; finish()
+  // adds .toast-success/.toast-error back once there's an actual outcome.
+  toast.classList.remove("toast-success");
+  toast.classList.add("toast-inprogress");
+  const icon = toast.querySelector(".toast-icon");
+  icon.className = "fa fa-spinner fa-spin toast-icon";
+  const body = toast.querySelector(".toast-body");
+  const messageEl = toast.querySelector(".toast-message");
+
+  const progressWrap = document.createElement("div");
+  progressWrap.className = "toast-progress-wrap";
+  progressWrap.innerHTML = /* html */ `
+    <div class="toast-progress-track"><div class="toast-progress-fill"></div></div>
+    <span class="toast-progress-label"></span>
+  `;
+  body.appendChild(progressWrap);
+  const fill = progressWrap.querySelector(".toast-progress-fill");
+  const label = progressWrap.querySelector(".toast-progress-label");
+
+  function update(status) {
+    const files = status.files || [];
+    const total = files.length || 1;
+    const doneCount = files.filter((f) => f.status === "succeeded" || f.status === "failed").length;
+
+    if (sizeInfo.allSizesKnown) {
+      // Byte-accurate: every selected item's real size was already known
+      // (from Feature 2's indexed folder sizes / pelicanfs's own per-file
+      // sizes) before this download even started. Still granular per
+      // *selected item*, not per byte transferred within a file — the
+      // backend has no mid-transfer progress to report (fs.get() is a
+      // single blocking call), so this is the finest resolution available
+      // without touching download mechanics itself.
+      let doneBytes = 0;
+      files.forEach((f) => {
+        if (f.status === "succeeded" || f.status === "failed") {
+          const info = sizeInfo.sizeByPath.get(f.path);
+          doneBytes += info ? info.size : 0;
+        }
+      });
+      const percent = Math.min(100, Math.round((doneBytes / sizeInfo.totalBytes) * 100));
+      fill.style.width = `${percent}%`;
+      label.textContent = `${formatBytes(doneBytes)} of ${formatBytes(sizeInfo.totalBytes)} · ${percent}%`;
+    } else {
+      // Fallback: at least one selected item (almost always an
+      // un-indexed folder) has no known real size, so a byte total would
+      // be a guess dressed up as a number — item-count progress instead,
+      // labeled so it's never mistaken for a byte-accurate figure.
+      const percent = Math.round((doneCount / total) * 100);
+      fill.style.width = `${percent}%`;
+      label.textContent = `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)`;
+    }
   }
+
+  function finish(result) {
+    const total = result.succeeded.length + result.failed.length;
+    fill.style.width = "100%";
+    toast.classList.remove("toast-inprogress");
+
+    if (result.failed.length === 0) {
+      toast.classList.add("toast-success");
+      icon.className = "fa fa-check-circle toast-icon";
+      messageEl.textContent = `"${sourceName}" downloaded — ${result.succeeded.length} item${result.succeeded.length === 1 ? "" : "s"}.`;
+      label.textContent = `${result.succeeded.length} of ${total} succeeded`;
+    } else if (result.succeeded.length === 0) {
+      toast.classList.remove("toast-success");
+      toast.classList.add("toast-error");
+      icon.className = "fa fa-exclamation-circle toast-icon";
+      messageEl.textContent = `"${sourceName}" failed — all ${result.failed.length} item${result.failed.length === 1 ? "" : "s"} failed. Check permissions on the destination and try again.`;
+      label.textContent = `0 of ${total} succeeded`;
+    } else {
+      toast.classList.remove("toast-success");
+      toast.classList.add("toast-error");
+      icon.className = "fa fa-exclamation-circle toast-icon";
+      messageEl.textContent = `"${sourceName}" partially downloaded — ${result.failed.length} of ${total} item${total === 1 ? "" : "s"} failed.`;
+      label.textContent = `${result.succeeded.length} of ${total} succeeded`;
+    }
+
+    if (result.succeeded.length > 0) {
+      const link = document.createElement("a");
+      link.className = "toast-action";
+      link.href = result.oodUrl;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.textContent = "Open in File Browser";
+      body.appendChild(link);
+    }
+  }
+
+  return { update, finish };
 }
 
 async function fetchLocalDirectory(path) {
