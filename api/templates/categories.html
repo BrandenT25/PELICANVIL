@@ -2,7 +2,11 @@
 <html>
   <head>
     <title>Categories | Pelican-UI</title>
+    {% if BLIND_MODE %}
+    <link rel="icon" type="image/svg+xml" href="{{ROOT_URL}}/api/static/img/blind-mode-favicon.svg">
+    {% else %}
     <link rel="icon" type="image/png" href="{{ROOT_URL}}/api/static/img/pelican-ui-logo.png">
+    {% endif %}
     <script>window.ROOT_PATH = "{{ROOT_URL}}" </script>
     <script>window.CATEGORY = "{{CATEGORY}}"</script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -14,6 +18,9 @@
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/navbar.css">
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/toast.css">
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/categories.css">
+    {% if BLIND_MODE %}
+    <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/blind-mode.css">
+    {% endif %}
   </head>
   <body>
     {% include "partials/navbar.html" %}

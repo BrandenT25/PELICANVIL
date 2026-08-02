@@ -463,3 +463,58 @@
     gap: 20px;
     box-sizing: border-box;
 }
+
+/* #region Blind-mode toggle */
+/* Deliberately unlabeled and tucked in a corner, not a headline admin
+   feature — this exists for pre-screenshot prep (double-blind conference
+   submissions), not day-to-day admin work, so it shouldn't compete for
+   attention with the actual dataset/category/user management above. The
+   title="Blind mode" attribute is the only label, visible on hover only. */
+.admin-misc-toggle {
+    position: fixed;
+    right: 16px;
+    bottom: 14px;
+    display: inline-flex;
+    cursor: pointer;
+    opacity: 0.35;
+    transition: opacity 0.15s ease;
+}
+.admin-misc-toggle:hover {
+    opacity: 0.85;
+}
+.admin-misc-toggle-input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+.admin-misc-toggle-track {
+    display: block;
+    width: 26px;
+    height: 14px;
+    border-radius: 999px;
+    background-color: #333;
+    border: 1px solid #444;
+    position: relative;
+    transition: background-color 0.15s ease;
+}
+.admin-misc-toggle-track::after {
+    content: "";
+    position: absolute;
+    top: 1px;
+    left: 1px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: #999;
+    transition: transform 0.15s ease, background-color 0.15s ease;
+}
+.admin-misc-toggle-input:checked + .admin-misc-toggle-track {
+    background-color: #333;
+    border-color: var(--accent, #cfb991);
+}
+.admin-misc-toggle-input:checked + .admin-misc-toggle-track::after {
+    transform: translateX(12px);
+    background-color: var(--accent, #cfb991);
+}
+/* #endregion */

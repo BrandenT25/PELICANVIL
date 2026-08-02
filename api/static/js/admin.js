@@ -681,7 +681,29 @@ async function removeUser(user){
 
 document.addEventListener("DOMContentLoaded", (event) => {
     displayDataset(true);
+    initBlindModeToggle();
 })
+
+/**
+ * Wires the small, unlabeled corner switch (see .admin-misc-toggle in
+ * admin.css) to POST /admin/blind-mode/toggle. No confirmation dialog, no
+ * toast beyond a brief one — this is meant to be quick to flip on/off
+ * repeatedly while taking screenshots, not a deliberate one-time action
+ * like the dataset/category mutations elsewhere on this page.
+ */
+function initBlindModeToggle(){
+    const input = document.querySelector(".admin-misc-toggle-input")
+    if (!input) return
+    input.addEventListener("change", async () => {
+        const result = await adminRequest(`${window.ROOT_PATH}/admin/blind-mode/toggle`, { method: "POST" })
+        if (!result.ok) {
+            showToast(result.error, "error")
+            input.checked = !input.checked
+            return
+        }
+        showToast(result.data.enabled ? "Blind mode on." : "Blind mode off.", "success", 2500)
+    })
+}
 
 function toggleOverlay(toggle){
     const overlay = document.querySelector(".modal-overlay")

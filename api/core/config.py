@@ -15,3 +15,9 @@ DOWNLOADS_DB_PATH = os.path.join(os.path.expanduser("~"), ".pelican-ui", "downlo
 # process needs to see and append to the same queue, and so does the single
 # shared worker, unlike per-user download history or per-user auth tokens.
 INDEXING_QUEUE_PATH = os.path.join(os.path.dirname(DB_PATH), "indexing_queue.json")
+
+# Site-wide "blind mode" flag (see api/core/blind_mode.py) — deliberately a
+# single shared flag next to DB_PATH/INDEXING_QUEUE_PATH, not per-user like
+# DOWNLOADS_DB_PATH: it's meant to affect every page load for everyone
+# hitting this deployment while it's on, not just the admin who flipped it.
+BLIND_MODE_PATH = os.path.join(os.path.dirname(DB_PATH), "blind_mode.flag")

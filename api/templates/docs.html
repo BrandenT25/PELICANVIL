@@ -3,7 +3,11 @@
   <head>
     <meta charset="utf-8">
     <title>Documentation | Pelican-UI</title>
+    {% if BLIND_MODE %}
+    <link rel="icon" type="image/svg+xml" href="{{ROOT_URL}}/api/static/img/blind-mode-favicon.svg">
+    {% else %}
     <link rel="icon" type="image/png" href="{{ROOT_URL}}/api/static/img/pelican-ui-logo.png">
+    {% endif %}
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -12,6 +16,9 @@
     <script src="{{ROOT_URL}}/api/static/js/docs.js" defer></script>
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/navbar.css">
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/docs.css">
+    {% if BLIND_MODE %}
+    <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/blind-mode.css">
+    {% endif %}
   </head>
   <body>
     {% include "partials/navbar.html" %}
@@ -47,7 +54,11 @@
         <h2 id="getting-started">Getting Started</h2>
 
         <h3 id="what-is-pelican-ui">What is pelican-ui?</h3>
+        {% if BLIND_MODE %}
+        <p>pelican-ui is a web app I built for browsing, streaming, and downloading datasets available through the Pelican/OSDF federated data platform, specifically for use on an HPC cluster. It came out of a research finding that OSDF currently has no central, public dataset catalog. This tool fills that gap by indexing a growing set of known, publicly accessible datasets, and it gives you a file browser, ready-made code snippets, and direct downloads to your cluster storage. You don't need to know a dataset's exact namespace path ahead of time.</p>
+        {% else %}
         <p>pelican-ui is a web app I built for browsing, streaming, and downloading datasets available through the Pelican/OSDF federated data platform, specifically for use on Purdue's Anvil HPC cluster. It came out of a research finding that OSDF currently has no central, public dataset catalog. This tool fills that gap by indexing a growing set of known, publicly accessible datasets, and it gives you a file browser, ready-made code snippets, and direct downloads to your Anvil storage. You don't need to know a dataset's exact namespace path ahead of time.</p>
+        {% endif %}
 
         <h3 id="what-is-pelican">What are Pelican and OSDF?</h3>
         <p>The Open Science Data Federation (OSDF) is a distributed data delivery network that lets you access datasets hosted at institutions across the country without staging files to local storage first. <a class="docs-inline-link" href="https://pelicanplatform.org/" target="_blank" rel="noopener">Pelican</a> is the platform that powers it. It provides both a command-line client and a Python library (<a class="docs-inline-link" href="https://github.com/PelicanPlatform/pelicanfs" target="_blank" rel="noopener">pelicanfs</a>) that plugs into standard scientific computing tools like xarray, pandas, and PyTorch. If you've used Globus or similar research data transfer tools before, the basic idea is similar: data stays where it lives, and you pull only what you actually need, when you need it. See the <a class="docs-inline-link" href="https://docs.pelicanplatform.org/about-pelican" target="_blank" rel="noopener">official Pelican usage docs</a> for the full reference.</p>
@@ -89,6 +100,16 @@ with osdf.open("/your-namespace/your-path/file.nc", "rb") as f:
     data = f.read()</code></pre>
 
         <h4>Pelican CLI</h4>
+        {% if BLIND_MODE %}
+        <pre><code class="language-bash"># Load the Pelican module
+module load pelican
+
+# Download a file
+pelican object get osdf:///your-namespace/your-path/file.nc ./file.nc
+
+# List a namespace's contents
+pelican object ls osdf:///your-namespace/your-path/</code></pre>
+        {% else %}
         <pre><code class="language-bash"># Load the Pelican module on Anvil
 module load pelican
 
@@ -97,6 +118,7 @@ pelican object get osdf:///your-namespace/your-path/file.nc ./file.nc
 
 # List a namespace's contents
 pelican object ls osdf:///your-namespace/your-path/</code></pre>
+        {% endif %}
 
         <h4>xarray</h4>
         <pre><code class="language-python">import xarray as xr
@@ -135,7 +157,11 @@ class OSDFDataset(Dataset):
         return len(self.paths)</code></pre>
 
         <h3 id="downloading-files">Downloading files to Home / Project / Scratch</h3>
+        {% if BLIND_MODE %}
+        <p>Once you've selected files or folders in the file browser, hit Select Folder to choose a destination on your cluster storage (Home, Project, or Scratch). pelican-ui browses your actual cluster directories, so you can navigate to wherever you want the files to land and then hit Download.</p>
+        {% else %}
         <p>Once you've selected files or folders in the file browser, hit Select Folder to choose a destination on Anvil (Home, Project, or Scratch). pelican-ui browses your actual Anvil directories, so you can navigate to wherever you want the files to land and then hit Download.</p>
+        {% endif %}
         <div class="docs-callout docs-callout-warn">
           <span class="docs-callout-label">Warn</span>
           <div class="docs-callout-body">Downloads run one file at a time in the background and don't block the page. pelican-ui doesn't show live per-file progress, but once everything has been attempted you'll get a summary in the download panel (and a toast) showing how many succeeded or failed, plus a link to open the destination folder in OOD's file browser. Give it a minute for large files or many selections before that summary appears.</div>
@@ -150,7 +176,11 @@ class OSDFDataset(Dataset):
         <p>Confirm you actually have write access to the destination. Project allocations in particular can have permission restrictions depending on how your allocation is set up. Also double check you selected a specific subfolder and not just the root of Home/Project/Scratch, since very large top-level directories can take a while to populate in the local file browser.</p>
 
         <h4>A snippet fails with an import error</h4>
+        {% if BLIND_MODE %}
+        <p>The snippets assume pelicanfs (and xarray/pandas/torch, depending on which snippet you used) are already installed in your active environment. pelican-ui doesn't install anything for you. Make sure you've activated a virtual environment and installed pelicanfs with pip install pelicanfs before running any of these.</p>
+        {% else %}
         <p>The snippets assume pelicanfs (and xarray/pandas/torch, depending on which snippet you used) are already installed in your active environment. pelican-ui doesn't install anything for you. If you're on Anvil, make sure you've activated a virtual environment and installed pelicanfs with pip install pelicanfs before running any of these.</p>
+        {% endif %}
 
         <h2 id="about-pelican-osdf">About Pelican / OSDF</h2>
         <p>Pelican and OSDF exist to solve a specific problem in research computing: getting data to where the compute is, without every researcher needing to manually download and re-download the same files to every machine they work on. Instead of copying files ahead of time, Pelican lets you open and stream them directly, the same way you'd open a local file, while caching copies closer to where they're actually being used. Pelican itself is open source — the <a class="docs-inline-link" href="https://github.com/PelicanPlatform" target="_blank" rel="noopener">PelicanPlatform GitHub org</a> hosts the platform, the CLI, and <a class="docs-inline-link" href="https://github.com/PelicanPlatform/pelicanfs" target="_blank" rel="noopener">pelicanfs</a>, the Python library used by the code snippets on this page.</p>
@@ -188,11 +218,6 @@ class OSDFDataset(Dataset):
         <p>This project's benchmarking compared Pelican/OSDF against GPFS and S3-backed storage across three tests: cache/time-to-first-byte behavior under concurrent load, download-first vs. streaming access patterns, and real ML training I/O (ResNet-50 on ImageNet). Streaming consistently outperformed downloading for partial-read workloads, and a warm OSDF cache came close to local storage performance. A cold cache was meaningfully slower, though, which matters for real workflow planning.</p>
         <p>The more original finding wasn't really about performance, though. It was that OSDF's biggest practical barrier right now is discoverability, not speed. There's no central catalog, and even once you find a dataset, whether it's actually streamable depends on how it happens to be packaged. pelican-ui exists as a direct, applied response to that gap.</p>
       </main>
-
-      <aside class="docs-toc">
-        <div class="docs-toc-title">On this page</div>
-        <ul class="docs-toc-list"></ul>
-      </aside>
 
     </div>
   </body>

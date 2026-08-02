@@ -2,7 +2,11 @@
 <html>
   <head>
     <title>Home | Pelican-UI</title>
+    {% if BLIND_MODE %}
+    <link rel="icon" type="image/svg+xml" href="{{ROOT_URL}}/api/static/img/blind-mode-favicon.svg">
+    {% else %}
     <link rel="icon" type="image/png" href="{{ROOT_URL}}/api/static/img/pelican-ui-logo.png">
+    {% endif %}
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -10,6 +14,9 @@
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@latest/tabler-icons.min.css">
     <link rel="stylesheet" href="{{ ROOT_URL }}/api/static/css/navbar.css">
     <link rel="stylesheet" href="{{ ROOT_URL }}/api/static/css/home.css">
+    {% if BLIND_MODE %}
+    <link rel="stylesheet" href="{{ ROOT_URL }}/api/static/css/blind-mode.css">
+    {% endif %}
   </head>
   <body>
     {% include "partials/navbar.html" %}

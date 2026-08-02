@@ -169,7 +169,7 @@
   font-size: clamp(0.78rem, 0.72rem + 0.2vw, 0.85rem);
   line-height: 1.5;
   font-style: italic;
-  color: rgba(207, 185, 145, 0.8);
+  color: rgba(var(--accent-rgb), 0.8);
   margin-top: 16px;
   margin-bottom: 6px;
   min-height: 0;
@@ -202,7 +202,7 @@
   transition: border-color 0.15s ease;
 }
 .dataset-snippet-selector-box:hover{
-  border-color: #cfb991;
+  border-color: var(--accent);
 }
 .dataset-snippet-selector-text{
   color:white;
@@ -286,7 +286,7 @@
     background-color: #0d0d0d;
     border-radius: 10px;
     border: 1px solid #2a2a2a;
-    border-left: 3px solid #cfb991;
+    border-left: 3px solid var(--accent);
     color: white;
     padding: 30px;
     position: relative;
@@ -333,8 +333,8 @@
 }
 
 .dataset-snippet-wrapper .fa-copy:hover {
-  color: #cfb991;
-  background-color: rgba(207, 185, 145, 0.12);
+  color: var(--accent);
+  background-color: rgba(var(--accent-rgb), 0.12);
 }
 
 
@@ -384,7 +384,7 @@
   flex-shrink: 0;
 }
 .file-browser-select-all:hover .folder-checkbox-custom {
-  border-color: #cfb991;
+  border-color: var(--accent);
 }
 .file-browser-select-all-label {
   font-family: Poppins, sans-serif;
@@ -471,7 +471,7 @@
   font-size: clamp(0.65625rem, 0.3047rem + 1.125vw, 0.9375rem);
 }
 .part-card:hover {
-  color: #cfb991;
+  color: var(--accent);
 }
 
 .file-browser-breadcrumbs {
@@ -521,12 +521,12 @@
   transition: border-color 0.15s ease, background-color 0.15s ease;
 }
 .folder-checkbox-wrapper:hover .folder-checkbox-custom {
-  border-color: #cfb991;
+  border-color: var(--accent);
 }
 
 .folder-checkbox:checked + .folder-checkbox-custom {
-  background-color: #cfb991;
-  border-color: #cfb991;
+  background-color: var(--accent);
+  border-color: var(--accent);
 }
 
 .folder-checkbox:checked + .folder-checkbox-custom:after {
@@ -577,7 +577,7 @@
 .file-browser-download-button {
   height: auto;
   width: auto;
-  background-color: #cfb991;
+  background-color: var(--accent);
   cursor: pointer;
   border-radius: 30px;
   margin: 0;
@@ -736,7 +736,7 @@
   transition: border-color 0.15s ease;
 }
 .select-static-mediums:hover {
-  border-color: #cfb991;
+  border-color: var(--accent);
 }
 .select-static-mediums-arrow {
   position: static;
@@ -805,7 +805,7 @@
   border-bottom: none;
 }
 .medium-selection-card .fa {
-  color: #cfb991;
+  color: var(--accent);
   width: 16px;
   text-align: center;
   font-size: 0.85rem;
@@ -892,7 +892,7 @@
     line-height: 1.4;
 }
 .directory-download-button {
-  background-color: #cfb991;
+  background-color: var(--accent);
   color: #1a1a1a;
   font-weight: 600;
   font-family: Poppins, sans-serif;
@@ -946,7 +946,7 @@
   align-items: center;
   gap: 8px;
   align-self: flex-start;
-  color: #cfb991;
+  color: var(--accent);
   font-family: Poppins, sans-serif;
   font-size: 0.82rem;
   font-weight: 600;
@@ -1027,7 +1027,7 @@
   margin-top: 10px;
 }
 .token-auth-modal-namespace {
-  color: #cfb991;
+  color: var(--accent);
   background-color: #0d0d0d;
   border: 1px solid #2a2a2a;
   border-radius: 4px;
@@ -1039,7 +1039,7 @@
   align-items: center;
   gap: 8px;
   margin-top: 12px;
-  color: #cfb991;
+  color: var(--accent);
   font-family: Poppins, sans-serif;
   font-size: 0.82rem;
   font-weight: 600;
@@ -1065,7 +1065,7 @@
 }
 .token-auth-modal-input:focus {
   outline: none;
-  border-color: #cfb991;
+  border-color: var(--accent);
 }
 .token-auth-modal-error {
   color: #e24b4a;
@@ -1099,7 +1099,7 @@
   font-size: 0.85rem;
   font-weight: 600;
   cursor: pointer;
-  background-color: #cfb991;
+  background-color: var(--accent);
   transition: background-color 0.15s ease;
 }
 .token-auth-modal-submit:hover {

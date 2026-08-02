@@ -11,8 +11,10 @@ from api.routes.database import dbRouter
 from api.routes.downloads import downloadsRouter
 from api.routes.token_auth import tokenAuthRouter
 from api.routes.indexing import indexingRouter
+from api.routes.blind_mode import blindModeRouter
 
 from api.auth import is_authorized
+from api.core.blind_mode import is_blind_mode
 
 USER = os.environ.get("USER")
 
@@ -25,9 +27,20 @@ app.include_router(dbRouter)
 app.include_router(downloadsRouter)
 app.include_router(tokenAuthRouter)
 app.include_router(indexingRouter)
+app.include_router(blindModeRouter)
 
 app.mount("/api/static", StaticFiles(directory="api/static"), name="static")
-templates = Jinja2Templates(directory="api/templates")
+
+
+def _blind_mode_context(request: Request) -> dict:
+    # Read fresh on every render (not cached at startup) so the admin
+    # toggle takes effect on the very next page load, for every page,
+    # without touching each individual route handler below to pass it
+    # through by hand.
+    return {"BLIND_MODE": is_blind_mode()}
+
+
+templates = Jinja2Templates(directory="api/templates", context_processors=[_blind_mode_context])
 
 
 

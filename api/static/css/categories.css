@@ -52,12 +52,12 @@ html, body {
 }
 .category-search-input:focus {
     outline: none;
-    border-color: #cfb991;
+    border-color: var(--accent);
 }
 .category-search-submit {
     height: 42px;
     padding: 0 20px;
-    background-color: #cfb991;
+    background-color: var(--accent);
     border: none;
     border-radius: 8px;
     color: #1a1a1a;
@@ -99,7 +99,7 @@ html, body {
     min-width: 0;
 }
 .category-card:hover {
-    border-color: #cfb991;
+    border-color: var(--accent);
     background-color: #202020;
     transform: translateY(-2px);
 }
@@ -120,7 +120,7 @@ html, body {
     width: 3.5rem;
     height: 3.5rem;
     border-radius: 10px;
-    background-color: rgba(207, 185, 145, 0.14);
+    background-color: rgba(var(--accent-rgb), 0.14);
     margin-bottom: 0.25rem;
 }
 .category-card-icon img {

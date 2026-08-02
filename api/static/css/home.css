@@ -73,7 +73,7 @@ body {
     color: #f5f5f5;
 }
 .hero-accent {
-    color: #cfb991;
+    color: var(--accent);
 }
 .hero-subtitle {
     display: flex;
@@ -85,7 +85,7 @@ body {
 .hero-subtitle-icon {
     flex-shrink: 0;
     font-size: clamp(1.75rem, 0.8125rem + 3vw, 2.5rem);
-    color: #cfb991;
+    color: var(--accent);
     line-height: 1;
 }
 .hero-subtitle-text {
@@ -115,7 +115,7 @@ body {
     transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
 }
 .cta-card:hover {
-    border-color: #cfb991;
+    border-color: var(--accent);
     background-color: #202020;
     transform: translateY(-2px);
 }
@@ -127,7 +127,7 @@ body {
     width: 5.5rem;
     height: 5.5rem;
     border-radius: 10px;
-    background-color: #cfb991;
+    background-color: var(--accent);
 }
 .cta-card-icon img {
     width: 3.5rem;
@@ -148,7 +148,7 @@ body {
 }
 .cta-card-arrow {
     flex-shrink: 0;
-    color: #cfb991;
+    color: var(--accent);
     transition: transform 0.2s ease;
 }
 .cta-card:hover .cta-card-arrow {
@@ -201,7 +201,7 @@ body {
     transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 .category-card:hover {
-    border-color: #cfb991;
+    border-color: var(--accent);
     background-color: #202020;
 }
 .category-card-icon {
@@ -228,7 +228,7 @@ body {
     transition: color 0.2s ease, transform 0.2s ease;
 }
 .category-card:hover .category-card-chevron {
-    color: #cfb991;
+    color: var(--accent);
     transform: translateX(3px);
 }
 /* #endregion */
@@ -246,14 +246,14 @@ body {
        10rem that left ~90px of dead space above the bar at desktop widths. */
     margin: calc(clamp(64px, 4px + 4.6875vw, 100px) + 1.5rem) auto 0;
     padding: 1rem clamp(2rem, 1vw + 1.5rem, 5rem);
-    border-left: 3px solid #cfb991;
-    background-color: rgba(207, 185, 145, 0.06);
+    border-left: 3px solid var(--accent);
+    background-color: rgba(var(--accent-rgb), 0.06);
     min-width: 0;
 }
 .dataset-overview-icon {
     flex-shrink: 0;
     font-size: 1.25rem;
-    color: #cfb991;
+    color: var(--accent);
 }
 .dataset-overview-text {
     color: #ccc;
@@ -291,7 +291,7 @@ body {
     min-width: 0;
 }
 .pelican-credit-description .pelican-credit-link {
-    color: #cfb991;
+    color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 2px;
 }
@@ -316,10 +316,10 @@ body {
     transition: border-color 0.15s ease, color 0.15s ease;
 }
 .pelican-credit-pill i {
-    color: #cfb991;
+    color: var(--accent);
 }
 .pelican-credit-pill:hover {
-    border-color: #cfb991;
-    color: #cfb991;
+    border-color: var(--accent);
+    color: var(--accent);
 }
 /* #endregion */

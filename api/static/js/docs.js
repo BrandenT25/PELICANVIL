@@ -1,36 +1,17 @@
 /*
  * docs.js — behavior for the Documentation page only.
- * 1. Builds the right-side "On this page" list from the content's h2/h3 headings.
- * 2. Scroll-spy: highlights the current heading in both the TOC and the sidebar.
- * 3. Sidebar group collapse/expand.
+ * 1. Scroll-spy: highlights the current heading in the left sidebar.
+ * 2. Sidebar group collapse/expand.
  * No fetches, no shared state — everything is local to this page.
  */
-
-function buildToc() {
-  const tocList = document.querySelector(".docs-toc-list");
-  const headings = document.querySelectorAll(".docs-content h2[id], .docs-content h3[id]");
-  headings.forEach((heading) => {
-    const item = document.createElement("li");
-    const link = document.createElement("a");
-    link.className = "docs-toc-link" + (heading.tagName === "H3" ? " docs-toc-sub" : "");
-    link.href = `#${heading.id}`;
-    link.textContent = heading.textContent;
-    item.appendChild(link);
-    tocList.appendChild(item);
-  });
-}
 
 function initScrollSpy() {
   const headings = Array.from(
     document.querySelectorAll(".docs-content h2[id], .docs-content h3[id]"),
   );
-  const tocLinks = document.querySelectorAll(".docs-toc-link");
   const sidebarLinks = document.querySelectorAll(".docs-sidebar-link");
 
   function setActive(id) {
-    tocLinks.forEach((link) => {
-      link.classList.toggle("active", link.getAttribute("href") === `#${id}`);
-    });
     sidebarLinks.forEach((link) => {
       link.classList.toggle("active", link.getAttribute("href") === `#${id}`);
     });
@@ -179,7 +160,6 @@ async function initDatasetCatalog() {
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  buildToc();
   initScrollSpy();
   initSidebarGroups();
   initDatasetCatalog();

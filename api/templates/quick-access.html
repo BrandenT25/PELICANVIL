@@ -2,7 +2,11 @@
 <html>
   <head>
     <title>Quick Access | Pelican-UI</title>
+    {% if BLIND_MODE %}
+    <link rel="icon" type="image/svg+xml" href="{{ROOT_URL}}/api/static/img/blind-mode-favicon.svg">
+    {% else %}
     <link rel="icon" type="image/png" href="{{ROOT_URL}}/api/static/img/pelican-ui-logo.png">
+    {% endif %}
     <script>window.ROOT_PATH = "{{ROOT_URL}}" </script>
     <script>window.USER = "{{USER}}"</script>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github-dark.min.css">
@@ -16,6 +20,9 @@
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/navbar.css">
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/toast.css">
     <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/quick-access.css">
+    {% if BLIND_MODE %}
+    <link rel="stylesheet" href="{{ROOT_URL}}/api/static/css/blind-mode.css">
+    {% endif %}
   </head>
   <body>
     {% include "partials/navbar.html" %}

@@ -1,0 +1,31 @@
+/*
+ * blind-mode.css — only linked when the site-wide blind-mode flag is on
+ * (see api/core/blind_mode.py, wired into every template's context via
+ * main.py). Loaded after every page's own stylesheets, so overriding
+ * --accent/--accent-rgb here (defined in navbar.css) is enough to retint
+ * every button/badge/link/focus-state in the app that already keys off
+ * those two custom properties — no second copy of any stylesheet needed.
+ *
+ * Muted slate blue, not a gray: picked to still read as an active,
+ * intentional accent color (this app uses the accent for real interactive
+ * affordances — buttons, links, focus rings — not just decoration), at
+ * roughly the same lightness as the original tan so contrast against the
+ * near-black background stays similar, but a cool hue that doesn't evoke
+ * any specific institution's palette the way the warm gold does.
+ */
+:root {
+  --accent: #7d97b0;
+  --accent-rgb: 125, 151, 176;
+}
+
+/* One accent use this custom property can't reach: the dropdown-arrow
+   icon on .dataset-filter-select (api/static/css/datasets.css) is a static
+   inline SVG background-image data-URI with the color baked into the SVG
+   markup itself — CSS custom properties don't get substituted inside an
+   opaque data-URI string, only in real property-value positions. Overriding
+   the whole background-image here, with the same neutral color re-encoded
+   into the SVG, is the only way to retint it; everything else in the app
+   picks up the --accent override above automatically. */
+.dataset-filter-select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%237d97b0' stroke-width='1.5' fill='none' fill-rule='evenodd'/%3E%3C/svg%3E");
+}

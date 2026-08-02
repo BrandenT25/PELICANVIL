@@ -1,3 +1,19 @@
+/* The single accent color, as a custom property rather than a literal
+   #cfb991 hardcoded at every use site — this file loads on every page, so
+   defining it here means the ~96 places across every stylesheet that used
+   to hardcode #cfb991 (or its rgba(207,185,145,X) translucent variants)
+   now all key off one value. That's what actually makes blind mode
+   (api/static/css/blind-mode.css) possible without a second, parallel copy
+   of every stylesheet — blind mode only needs to override this one
+   declaration, loaded after this file, and every button/badge/link
+   picks it up automatically. --accent-rgb exists alongside --accent
+   because rgba() can't decompose a hex custom property into components;
+   keeping both in sync is why they're declared together, in one place. */
+:root {
+  --accent: #cfb991;
+  --accent-rgb: 207, 185, 145;
+}
+
 /* Shared navbar — pairs with templates/partials/navbar.html. Loaded by every page.
    Structural sizes use px-based clamp() (slope/intercept computed on 1280→2048px)
    so the bar scales continuously and is unaffected by the 70.5% root-font hack. */
@@ -29,7 +45,7 @@
     justify-content: flex-end;
     gap: clamp(12px, -4px + 1.25vw, 22px);
     padding: 0 clamp(12px, -8px + 1.5625vw, 24px);
-    background-color: #cfb991;
+    background-color: var(--accent);
     border-radius: 10px 0 0 10px;
     min-width: 0;
 }
@@ -42,6 +58,18 @@
     display: block;
     width: clamp(44px, 24.3px + 2.474vw, 75px);
     height: auto;
+}
+/* Blind-mode stand-in for the logo image — a real wordmark (plain text,
+   no icon), not just a hidden slot. Sized off font-size directly rather
+   than reusing the image's own width-based clamp(), since a text element's
+   footprint doesn't scale the same way an image's does. */
+.navbar-wordmark {
+    font-family: Poppins, sans-serif;
+    font-weight: 600;
+    font-size: clamp(18px, 10px + 1.2vw, 28px);
+    color: white;
+    letter-spacing: -0.01em;
+    white-space: nowrap;
 }
 .navbar-links {
     display: flex;
@@ -68,8 +96,8 @@
     transition: color 0.15s ease, border-bottom-color 0.15s ease;
 }
 .navbar-link:hover {
-    color: #cfb991;
-    border-bottom-color: #cfb991;
+    color: var(--accent);
+    border-bottom-color: var(--accent);
 }
 .navbar-downloads-link {
     /* same weight/sizing/padding/hover mechanics as .navbar-link — color is

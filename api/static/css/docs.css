@@ -9,7 +9,7 @@ a {
   color: inherit;
 }
 .docs-inline-link {
-  color: #cfb991;
+  color: var(--accent);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
@@ -22,23 +22,21 @@ body {
   min-height: 100vh;
 }
 
-/* #region Layout — sidebar | content | toc */
+/* #region Layout — sidebar | content */
 .docs-layout {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr) 220px;
+  /* Was 240px minmax(0, 1fr) 220px with a right-hand ToC column — the Docs
+     page is one long scroll, not paginated, so an in-page "On this page"
+     jump-list didn't earn its column. This two-column shape is also
+     exactly what the old ≤1150px breakpoint already collapsed to, so
+     removing the third column here doesn't introduce new untested layout
+     behavior — it just makes that already-proven shape the default. */
+  grid-template-columns: 240px minmax(0, 1fr);
   gap: clamp(24px, 3vw, 56px);
   max-width: 1500px;
   margin: 0 auto;
   padding: calc(clamp(64px, 4px + 4.6875vw, 100px) + 2.5rem) clamp(16px, 2vw, 32px) 5rem;
   min-width: 0;
-}
-@media (max-width: 1150px) {
-  .docs-layout {
-    grid-template-columns: 240px minmax(0, 1fr);
-  }
-  .docs-toc {
-    display: none;
-  }
 }
 @media (max-width: 800px) {
   .docs-layout {
@@ -93,9 +91,9 @@ body {
   background-color: #1a1a1a;
 }
 .docs-sidebar-link.active {
-  color: #cfb991;
-  border-left-color: #cfb991;
-  background-color: rgba(207, 185, 145, 0.08);
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background-color: rgba(var(--accent-rgb), 0.08);
 }
 .docs-sidebar-group-header {
   display: flex;
@@ -210,7 +208,7 @@ body {
 .docs-content code {
   font-family: monospace;
   font-size: 0.85em;
-  color: #cfb991;
+  color: var(--accent);
   background-color: #1a1a1a;
   border: 1px solid #2a2a2a;
   border-radius: 4px;
@@ -220,7 +218,7 @@ body {
 .docs-content pre {
   background-color: #0d0d0d;
   border: 1px solid #2a2a2a;
-  border-left: 3px solid #cfb991;
+  border-left: 3px solid var(--accent);
   border-radius: 8px;
   padding: 16px 20px;
   margin-bottom: 1.25rem;
@@ -307,12 +305,12 @@ figure.docs-todo figcaption {
   overflow-wrap: anywhere;
 }
 .docs-callout-note {
-  background-color: rgba(207, 185, 145, 0.07);
-  border: 1px solid rgba(207, 185, 145, 0.35);
-  border-left: 3px solid #cfb991;
+  background-color: rgba(var(--accent-rgb), 0.07);
+  border: 1px solid rgba(var(--accent-rgb), 0.35);
+  border-left: 3px solid var(--accent);
 }
 .docs-callout-note .docs-callout-label {
-  color: #cfb991;
+  color: var(--accent);
 }
 .docs-callout-warn {
   background-color: rgba(226, 75, 74, 0.07);
@@ -361,7 +359,7 @@ figure.docs-todo figcaption {
 }
 .docs-catalog-search-input:focus {
   outline: none;
-  border-color: #cfb991;
+  border-color: var(--accent);
 }
 .docs-catalog-table-wrapper {
   overflow-x: auto;
@@ -400,7 +398,7 @@ figure.docs-todo figcaption {
   transition: color 0.15s ease;
 }
 .docs-catalog-sortable:hover {
-  color: #cfb991;
+  color: var(--accent);
 }
 .docs-catalog-sort-arrow {
   display: inline-block;
@@ -415,11 +413,11 @@ figure.docs-todo figcaption {
 }
 .docs-catalog-sort-arrow.active {
   opacity: 1;
-  border-bottom-color: #cfb991;
+  border-bottom-color: var(--accent);
 }
 .docs-catalog-sort-arrow.active.desc {
   border-bottom: none;
-  border-top: 5px solid #cfb991;
+  border-top: 5px solid var(--accent);
 }
 .docs-catalog-table td {
   padding: 10px 14px;
@@ -438,7 +436,7 @@ figure.docs-todo figcaption {
   transition: color 0.15s ease;
 }
 .docs-catalog-dataset-link:hover {
-  color: #cfb991;
+  color: var(--accent);
   text-decoration: underline;
 }
 .docs-catalog-uncategorized {
@@ -453,51 +451,3 @@ figure.docs-todo figcaption {
 }
 /* #endregion */
 
-/* #region Right-side "On this page" panel */
-.docs-toc {
-  position: sticky;
-  top: calc(clamp(64px, 4px + 4.6875vw, 100px) + 2rem);
-  align-self: start;
-  max-height: calc(100vh - clamp(64px, 4px + 4.6875vw, 100px) - 4rem);
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #444 #0a0a0a;
-  min-width: 0;
-  border-left: 1px solid #2a2a2a;
-  padding-left: 16px;
-}
-.docs-toc-title {
-  font-size: 0.78rem;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: #888;
-  margin-bottom: 10px;
-}
-.docs-toc-list {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-}
-.docs-toc-link {
-  display: block;
-  padding: 4px 0;
-  font-size: 0.8rem;
-  color: #999;
-  min-width: 0;
-  overflow-wrap: anywhere;
-  transition: color 0.15s ease;
-}
-.docs-toc-link:hover {
-  color: #f5f5f5;
-}
-.docs-toc-link.active {
-  color: #cfb991;
-}
-.docs-toc-link.docs-toc-sub {
-  padding-left: 14px;
-  font-size: 0.76rem;
-}
-/* #endregion */
