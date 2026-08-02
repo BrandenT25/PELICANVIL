@@ -1209,3 +1209,156 @@ clamp(s_1px, calc(b + (m*100)vw), s_2px)
 }
 
 /* #endregion */
+
+/* #region Token Auth Modal */
+
+.token-auth-modal-overlay {
+  display: none;
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1000;
+}
+.token-auth-modal-overlay.show {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.token-auth-modal {
+  background-color: #1a1a1a;
+  border: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 90%;
+  max-width: 480px;
+  margin: auto;
+  padding: 20px;
+  border-radius: 12px;
+  position: relative;
+}
+.token-auth-modal-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  border: none;
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+  color: white;
+  transition: background-color 0.15s ease;
+}
+.token-auth-modal-close-btn:hover {
+  background-color: #2a2a2a;
+}
+.token-auth-modal-header {
+  padding-right: 30px;
+}
+.token-auth-modal-header h1 {
+  color: white;
+  font-family: Poppins, sans-serif;
+  font-size: 1.25rem;
+  font-weight: 600;
+}
+.token-auth-modal-explainer {
+  font-family: Poppins, sans-serif;
+  font-size: clamp(0.78rem, 0.72rem + 0.2vw, 0.85rem);
+  line-height: 1.5;
+  color: #999;
+  margin-top: 10px;
+}
+.token-auth-modal-namespace {
+  color: #cfb991;
+  background-color: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 1px 6px;
+  word-break: break-all;
+}
+.token-auth-modal-docs-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  color: #cfb991;
+  font-family: Poppins, sans-serif;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.token-auth-modal-docs-link:hover {
+  color: #b9a476;
+}
+.token-auth-modal-input {
+  width: 100%;
+  height: 42px;
+  padding: 0 14px;
+  background-color: #141414;
+  border: 1px solid #333;
+  border-radius: 8px;
+  color: #f5f5f5;
+  font-family: Poppins, sans-serif;
+  font-size: 0.85rem;
+}
+.token-auth-modal-input::placeholder {
+  color: #666;
+}
+.token-auth-modal-input:focus {
+  outline: none;
+  border-color: #cfb991;
+}
+.token-auth-modal-error {
+  color: #e24b4a;
+  font-family: Poppins, sans-serif;
+  font-size: 0.82rem;
+}
+.token-auth-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+}
+.token-auth-modal-cancel {
+  padding: 0.5rem 1.25rem;
+  border-radius: 30px;
+  color: #f5f5f5;
+  font-family: Poppins, sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  background-color: #2a2a2a;
+  transition: background-color 0.15s ease;
+}
+.token-auth-modal-cancel:hover {
+  background-color: #333;
+}
+.token-auth-modal-submit {
+  padding: 0.5rem 1.25rem;
+  border-radius: 30px;
+  color: #1a1a1a;
+  font-family: Poppins, sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  background-color: #cfb991;
+  transition: background-color 0.15s ease;
+}
+.token-auth-modal-submit:hover {
+  background-color: #b9a476;
+}
+.token-auth-modal-submit.disabled {
+  opacity: 0.6;
+  cursor: default;
+  pointer-events: none;
+}
+
+/* #endregion */

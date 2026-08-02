@@ -1,8 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from pelicanfs import OSDFFileSystem
+from pelicanfs.exceptions import NoCredentialsException
+import aiohttp
 import fsspec, os, json, shutil, logging
 from pathlib import Path
 from collections import defaultdict
+from api.core.pelican_auth import get_token_for_namespace
 osdf = OSDFFileSystem(direct_reads=False)
 
 logger = logging.getLogger("pelican-ui.pelican")
@@ -14,11 +17,51 @@ USER = os.environ.get("USER")
 SCRATCH_PATH = os.path.join("/anvil", "scratch", USER)
 
 
+def _resolve_filesystem(namespace: str) -> OSDFFileSystem:
+    """Most calls reuse the shared module-level `osdf` instance (fine — it's
+    unauthenticated). When a token has been saved for this namespace (see
+    api/routes/token_auth.py), build a one-off instance carrying it instead:
+    pelicanfs's own token discovery is a single global value and can't
+    represent different tokens for different namespaces, and the shared
+    `osdf` instance can't have its headers swapped per-call safely since
+    requests against other namespaces may be in flight concurrently.
+    """
+    token = get_token_for_namespace(namespace)
+    if token:
+        return OSDFFileSystem(direct_reads=False, headers={"Authorization": f"Bearer {token}"})
+    return osdf
+
+
+def _is_auth_required(exc: Exception) -> bool:
+    """True if exc means "this namespace needs a token" rather than some
+    other failure (network issue, genuine 404/500, etc). Covers both cases
+    pelicanfs's own troubleshooting docs describe: no credential discovered
+    at all (NoCredentialsException, raised by pelicanfs itself), and a
+    401/403 surfaced by the origin when a stale/invalid token is present but
+    still rejected (surfaces as aiohttp.ClientResponseError via the
+    underlying fsspec HTTPFileSystem's raise_for_status())."""
+    if isinstance(exc, NoCredentialsException):
+        return True
+    return isinstance(exc, aiohttp.ClientResponseError) and exc.status in (401, 403)
+
+
 class DownloadError(Exception):
     """Raised by download_one_file instead of HTTPException. This is called
     from background job threads (api/routes/downloads.py), not just request
     handlers, and HTTPException only makes sense when there's an active
     request to attach a status code to."""
+
+
+class DownloadAuthRequiredError(DownloadError):
+    """Same "needs a token" case as the 401 branch in pelicanlistPath below,
+    just surfaced through DownloadError's channel since download_one_file
+    runs on a background job thread with no request to attach a status code
+    to (see downloads.py's _run_download_job, which reads .namespace off
+    this to flag the failed file for the frontend's retry-with-token flow)."""
+
+    def __init__(self, namespace: str):
+        self.namespace = namespace
+        super().__init__(f'"{namespace}" requires an access token.')
 
 
 def download_one_file(filepath: str, storage_location: str) -> None:
@@ -33,24 +76,37 @@ def download_one_file(filepath: str, storage_location: str) -> None:
     # background thread (api/routes/downloads.py's job worker), never from
     # directly inside a request handler.
     path = filepath.rstrip("/")
+    fs = _resolve_filesystem(path)
     try:
-        osdf.get(path, storage_location, recursive=True)
+        fs.get(path, storage_location, recursive=True)
     except FileNotFoundError:
         raise DownloadError(f'"{filepath}" was not found on the federation.') from None
     except PermissionError:
         raise DownloadError(f"You don't have permission to write to {storage_location}.") from None
     except Exception as e:
+        if _is_auth_required(e):
+            raise DownloadAuthRequiredError(path) from None
         logger.exception("download_one_file failed for %s -> %s", filepath, storage_location)
         raise DownloadError("Download failed. Check server logs.") from e
 
 
 @pelicanRouter.get("/datasets/category/list-path")
 def pelicanlistPath(path: str):
+    fs = _resolve_filesystem(path)
     try:
-        return osdf.ls(path)
+        return fs.ls(path)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f'Path "{path}" was not found on the federation.')
-    except Exception:
+    except Exception as e:
+        if _is_auth_required(e):
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "error": "auth_required",
+                    "namespace": path,
+                    "message": f'"{path}" requires an access token.',
+                },
+            ) from None
         logger.exception("pelicanlistPath failed for %s", path)
         raise HTTPException(status_code=502, detail="Couldn't reach the Pelican/OSDF federation. Try again.")
 

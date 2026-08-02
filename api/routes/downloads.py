@@ -4,7 +4,7 @@ import sqlite3, os, json, threading, uuid, logging
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 from api.core.config import DOWNLOADS_DB_PATH
-from api.routes.pelican import download_one_file, DownloadError
+from api.routes.pelican import download_one_file, DownloadError, DownloadAuthRequiredError
 
 downloadsRouter = APIRouter()
 
@@ -168,6 +168,17 @@ def _run_download_job(job_id: str, history_id: int, destination: str, paths: lis
             download_one_file(path, destination)
             files[i]["status"] = "succeeded"
             succeeded.append(path)
+        except DownloadAuthRequiredError as e:
+            # Flagged distinctly from a plain DownloadError so the frontend's
+            # poll loop (downloadFromPath in quick-access.js/datasets.js) can
+            # tell "needs a token" apart from "actually broke" and pop the
+            # same token modal browsing uses, instead of just reporting a
+            # generic failure.
+            files[i]["status"] = "failed"
+            files[i]["error"] = str(e)
+            files[i]["auth_required"] = True
+            files[i]["namespace"] = e.namespace
+            failed.append(path)
         except DownloadError as e:
             files[i]["status"] = "failed"
             files[i]["error"] = str(e)

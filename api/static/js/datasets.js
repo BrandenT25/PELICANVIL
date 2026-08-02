@@ -489,7 +489,7 @@ function loadDirectory(path, container, breadcrumbs, download_card) {
   if (!container.basePath) {
     container.basePath = path;
   }
-  
+
   container.innerHTML = "";
   breadcrumbs.innerHTML = "";
   if (container.selectAllCheckbox) {
@@ -497,7 +497,7 @@ function loadDirectory(path, container, breadcrumbs, download_card) {
   }
 
   makeBreadcrumbs(breadcrumbs, container, download_card);
-  makeFolderCards(path, container, download_card, breadcrumbs);
+  makeFolderCards(path, container, download_card, breadcrumbs, false);
 }
 
 /**
@@ -510,8 +510,17 @@ function loadDirectory(path, container, breadcrumbs, download_card) {
  * @returns {Promise<void>}
  */
 
-async function makeFolderCards(path, container, download_card, breadcrumbs) {
+async function makeFolderCards(path, container, download_card, breadcrumbs, isRetry = false) {
   const paths = await retrieveDirectoryPaths(path);
+
+  if (paths && paths.authRequired) {
+    showTokenAuthModal(
+      paths.namespace,
+      () => makeFolderCards(path, container, download_card, breadcrumbs, true),
+      isRetry ? "That token was rejected. Check it and try again." : "",
+    );
+    return;
+  }
 
   if (paths === null) {
     showToast("Couldn't load this folder. Try again.", "error");
@@ -629,6 +638,12 @@ async function retrieveDirectoryPaths(path) {
       `${window.ROOT_PATH}/datasets/category/list-path?path=${path}`,
     );
     if (!response.ok) {
+      if (response.status === 401) {
+        const namespace = await extractAuthRequiredNamespace(response);
+        if (namespace) {
+          return { authRequired: true, namespace };
+        }
+      }
       throw new Error(`HTTP error! status ${response.status} `);
     }
 
@@ -638,6 +653,128 @@ async function retrieveDirectoryPaths(path) {
     console.log("error with", error);
     return null;
   }
+}
+
+/**
+ * Reads the {detail: {error: "auth_required", namespace}} body the backend
+ * sends for a 401 from /datasets/category/list-path (see pelicanlistPath in
+ * api/routes/pelican.py) and pulls out the namespace path, or null if this
+ * 401 wasn't actually that shape (a plain auth failure elsewhere, etc).
+ * @param {Response} response
+ * @returns {Promise<string|null>}
+ */
+async function extractAuthRequiredNamespace(response) {
+  try {
+    const body = await response.json();
+    if (body && body.detail && body.detail.error === "auth_required") {
+      return body.detail.namespace;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/**
+ * Shows the "this namespace needs a token" modal: explanation, a masked
+ * input, a link to Pelican's own token docs, and Submit/Cancel. On submit,
+ * POSTs the token to /auth/token then re-runs whatever action triggered the
+ * modal (onRetry) — that action's own auth-required handling reopens this
+ * modal with an inline error if the token turns out to be bad/expired,
+ * rather than this function needing to know what "success" looks like for
+ * every possible caller.
+ * @param {string} namespace
+ * @param {() => (void|Promise<void>)} onRetry
+ * @param {string} [initialError]
+ */
+function showTokenAuthModal(namespace, onRetry, initialError = "") {
+  const overlay = document.querySelector(".token-auth-modal-overlay");
+  overlay.innerHTML = "";
+
+  const modal = document.createElement("div");
+  modal.className = "token-auth-modal";
+  modal.innerHTML = /* html */ `
+    <div class="token-auth-modal-close-btn"><span>&times;</span></div>
+    <div class="token-auth-modal-header">
+      <h1>Access Token Required</h1>
+      <p class="token-auth-modal-explainer">
+        <code class="token-auth-modal-namespace"></code> is a protected namespace and requires an access token to browse or download.
+        Get one from your Pelican federation administrator or token issuer, then paste it below.
+      </p>
+      <a class="token-auth-modal-docs-link" href="https://docs.pelicanplatform.org/getting-data-with-pelican/auth" target="_blank" rel="noopener noreferrer">
+        <i class="fa fa-external-link"></i> How to get a token
+      </a>
+    </div>
+    <input type="password" class="token-auth-modal-input" placeholder="Paste your access token" autocomplete="off" />
+    <div class="token-auth-modal-error" style="display:none;"></div>
+    <div class="token-auth-modal-actions">
+      <div class="token-auth-modal-cancel">Cancel</div>
+      <div class="token-auth-modal-submit">Submit</div>
+    </div>
+  `;
+  // namespace set via textContent, not template interpolation, so a
+  // namespace path can never be interpreted as HTML
+  modal.querySelector(".token-auth-modal-namespace").textContent = namespace;
+
+  overlay.appendChild(modal);
+  overlay.classList.add("show");
+
+  const closeBtn = modal.querySelector(".token-auth-modal-close-btn");
+  const cancelBtn = modal.querySelector(".token-auth-modal-cancel");
+  const submitBtn = modal.querySelector(".token-auth-modal-submit");
+  const input = modal.querySelector(".token-auth-modal-input");
+  const errorBox = modal.querySelector(".token-auth-modal-error");
+
+  if (initialError) {
+    errorBox.textContent = initialError;
+    errorBox.style.display = "block";
+  }
+
+  function close() {
+    overlay.classList.remove("show");
+    overlay.innerHTML = "";
+  }
+
+  closeBtn.addEventListener("click", close);
+  cancelBtn.addEventListener("click", close);
+
+  async function submit() {
+    const token = input.value.trim();
+    if (!token) {
+      errorBox.textContent = "Paste a token first.";
+      errorBox.style.display = "block";
+      return;
+    }
+    errorBox.style.display = "none";
+    submitBtn.classList.add("disabled");
+
+    try {
+      const response = await fetch(`${window.ROOT_PATH}/auth/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ namespace, token }),
+      });
+      const body = await response.json().catch(() => ({ success: false }));
+      if (!response.ok || !body.success) {
+        errorBox.textContent = "Couldn't save the token. Try again.";
+        errorBox.style.display = "block";
+        submitBtn.classList.remove("disabled");
+        return;
+      }
+    } catch (error) {
+      console.log("saving token failed", error);
+      errorBox.textContent = "Couldn't reach the server. Try again.";
+      errorBox.style.display = "block";
+      submitBtn.classList.remove("disabled");
+      return;
+    }
+
+    close();
+    await onRetry();
+  }
+
+  submitBtn.addEventListener("click", submit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") submit();
+  });
 }
 
 /**
@@ -1160,12 +1297,24 @@ async function downloadFromPath(file, paths, sourceName) {
     return { succeeded: [], failed: pathList, destination: fullPath, oodUrl };
   }
 
-  let status = job;
+  const status = await pollDownloadJob(job.job_id);
+  return await resolveDownloadAuth(status, job.history_id, fullPath, oodUrl);
+}
+
+/**
+ * Polls /datasets/download/status/{jobId} until it reaches a terminal
+ * status or DOWNLOAD_POLL_MAX_ATTEMPTS is hit. Split out of downloadFromPath
+ * so resolveDownloadAuth below can reuse it for polling a restarted job too.
+ * @param {string} jobId
+ * @returns {Promise<Object>} the last job status payload received
+ */
+async function pollDownloadJob(jobId) {
+  let status = { status: "pending" };
   for (let attempt = 0; attempt < DOWNLOAD_POLL_MAX_ATTEMPTS; attempt++) {
     if (DOWNLOAD_TERMINAL_STATUSES.includes(status.status)) break;
     await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_POLL_INTERVAL_MS));
     try {
-      const response = await fetch(`${window.ROOT_PATH}/datasets/download/status/${job.job_id}`, { cache: "no-store" });
+      const response = await fetch(`${window.ROOT_PATH}/datasets/download/status/${jobId}`, { cache: "no-store" });
       if (!response.ok) {
         throw new Error(`HTTP error! status ${response.status}`);
       }
@@ -1176,11 +1325,62 @@ async function downloadFromPath(file, paths, sourceName) {
       console.log("polling download job failed", error);
     }
   }
+  return status;
+}
 
+/**
+ * If a finished job has a file that failed because its namespace needs a
+ * token (see the auth_required/namespace fields _run_download_job adds in
+ * api/routes/downloads.py), shows the same token modal browsing uses and,
+ * on submit, retries via the existing "restart failed files" endpoint
+ * (POST /downloads/history/{id}/restart) rather than re-implementing
+ * "retry only what failed" here. Recurses once on a second auth failure so
+ * a bad/expired token reopens the modal with an inline error instead of
+ * failing silently.
+ * @param {Object} status - a terminal job status payload (has .files)
+ * @param {number} [historyId] - from the job's history_id, needed to restart
+ * @param {string} fullPath
+ * @param {string} oodUrl
+ * @param {boolean} [isRetry]
+ * @returns {Promise<{succeeded: string[], failed: string[], destination: string, oodUrl: string}>}
+ */
+async function resolveDownloadAuth(status, historyId, fullPath, oodUrl, isRetry = false) {
+  const files = status.files || [];
+  const authFailure = files.find((f) => f.status !== "succeeded" && f.auth_required);
+
+  if (authFailure && historyId) {
+    return new Promise((resolve) => {
+      showTokenAuthModal(
+        authFailure.namespace,
+        async () => {
+          let restartedJobId;
+          try {
+            const response = await fetch(`${window.ROOT_PATH}/downloads/history/${historyId}/restart`, { method: "POST" });
+            if (!response.ok) {
+              throw new Error(`HTTP error! status ${response.status}`);
+            }
+            const restarted = await response.json();
+            restartedJobId = restarted.job_id;
+          } catch (error) {
+            console.log("restarting download after token save failed", error);
+            resolve(buildDownloadResult(status, fullPath, oodUrl));
+            return;
+          }
+          const retryStatus = await pollDownloadJob(restartedJobId);
+          resolve(await resolveDownloadAuth(retryStatus, historyId, fullPath, oodUrl, true));
+        },
+        isRetry ? "That token was rejected. Check it and try again." : "",
+      );
+    });
+  }
+
+  return buildDownloadResult(status, fullPath, oodUrl);
+}
+
+function buildDownloadResult(status, fullPath, oodUrl) {
   const files = status.files || [];
   const succeeded = files.filter((f) => f.status === "succeeded").map((f) => f.path);
   const failed = files.filter((f) => f.status !== "succeeded").map((f) => f.path);
-
   return { succeeded, failed, destination: fullPath, oodUrl };
 }
 
