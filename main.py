@@ -10,6 +10,7 @@ from api.routes.local import localRouter
 from api.routes.database import dbRouter
 from api.routes.downloads import downloadsRouter
 from api.routes.token_auth import tokenAuthRouter
+from api.routes.indexing import indexingRouter
 
 from api.auth import is_authorized
 
@@ -23,6 +24,7 @@ app.include_router(localRouter)
 app.include_router(dbRouter)
 app.include_router(downloadsRouter)
 app.include_router(tokenAuthRouter)
+app.include_router(indexingRouter)
 
 app.mount("/api/static", StaticFiles(directory="api/static"), name="static")
 templates = Jinja2Templates(directory="api/templates")

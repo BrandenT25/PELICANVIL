@@ -3,6 +3,7 @@ from pydantic import BaseModel
 import sqlite3, os, json, logging
 from api.auth import is_authorized
 from api.core.config import DB_PATH
+from api.core.indexing_queue import enqueue_indexing_request
 
 logger = logging.getLogger("pelican-ui.admin")
 
@@ -32,6 +33,7 @@ async def addDataset(dataset: DatasetCreate):
     con = sqlite3.connect(DB_PATH)
     try:
         cur = con.cursor()
+        new_id = None
         try:
             cur.execute(
                 'INSERT INTO datasets (name, description, path, format, streamable, access, tags) VALUES (?, ?, ?, ?, ?, ?, ?)',
@@ -46,6 +48,7 @@ async def addDataset(dataset: DatasetCreate):
                 )
             )
             con.commit()
+            new_id = cur.lastrowid
         except sqlite3.IntegrityError:
             raise HTTPException(status_code=409, detail=f'A dataset with the path "{dataset.path}" already exists.')
     except HTTPException:
@@ -55,6 +58,13 @@ async def addDataset(dataset: DatasetCreate):
         raise HTTPException(status_code=500, detail="Save failed. Check server logs.")
     finally:
         con.close()
+    # Automatic indexing trigger — new datasets get sized without a separate
+    # manual step. Best-effort: a queue-file hiccup here shouldn't fail the
+    # dataset creation itself, since the dataset row is already committed.
+    try:
+        enqueue_indexing_request(new_id, dataset.path, USER)
+    except Exception:
+        logger.exception("Failed to auto-enqueue indexing for new dataset %s", new_id)
     return {"status": "success", "name": dataset.name}
 
 @dbRouter.post("/admin/remove-dataset")

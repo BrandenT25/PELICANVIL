@@ -1,6 +1,14 @@
+// setInterval handles for every dataset card currently polling its index
+// status, mirroring downloads.js's activePollHandles — without this,
+// rebuilding datasetWrapper's innerHTML on every displayDataset(true) call
+// would leak intervals still firing against now-detached card elements.
+let activeIndexPollHandles = []
+
 async function displayDataset(toggle){
 
     if(toggle === true){
+        activeIndexPollHandles.forEach(clearInterval)
+        activeIndexPollHandles = []
         datasetSelectionButton.classList.add("active")
         datasetWrapper.innerHTML = /* html */ `
             <div class="searchbar-wrapper">
@@ -33,8 +41,10 @@ async function displayDataset(toggle){
                 <div class="text-wrapper">
                     <span class="datasetName">${dataset["name"]}</span>
                     <span class="datasetDescription">${dataset["path"]}</span>
+                    <span class="index-status-badge"></span>
                 </div>
                 <div class="modify-wrapper">
+                    <i class="fa fa-refresh" id="reindex-btn" title="Re-index dataset size"></i>
                     <i class="fa fa-edit" id="modify-btn"></i>
                     <i class="fa fa-trash" id="remove-btn"></i>
                 </div>
@@ -42,6 +52,7 @@ async function displayDataset(toggle){
             `
             const modifybtn = datasetCard.querySelector("#modify-btn")
             const removeBtn = datasetCard.querySelector("#remove-btn")
+            const reindexBtn = datasetCard.querySelector("#reindex-btn")
             modifybtn.addEventListener("click", async () =>{
                 editDataset(dataset)
                 displayDataset(true)
@@ -56,7 +67,19 @@ async function displayDataset(toggle){
                 displayDataset(true)
 
             })
+            reindexBtn.addEventListener("click", async () => {
+                reindexBtn.classList.add("disabled")
+                const result = await triggerReindex(dataset.id)
+                if (!result.ok) {
+                    showToast(result.error, "error")
+                    reindexBtn.classList.remove("disabled")
+                    return
+                }
+                showToast(`Re-indexing "${dataset.name}" queued.`, "success")
+                refreshIndexStatus(datasetCard, dataset.id)
+            })
             cardWrapper.appendChild(datasetCard)
+            refreshIndexStatus(datasetCard, dataset.id)
         })
         const addDatasetCard = datasetWrapper.querySelector("#add-card")
         addDatasetCard.addEventListener("click", () =>{
@@ -740,6 +763,84 @@ async function removeCategory(url){
     return adminRequest(`${window.ROOT_PATH}/admin/remove-category?category_url=${encodeURIComponent(url)}`, {
         method: "POST",
     })
+}
+
+const INDEX_STATUS_LABELS = {
+    never_indexed: "Not indexed",
+    queued: "Queued",
+    in_progress: "Indexing…",
+    complete: "Indexed",
+    failed: "Index failed",
+}
+// Only these two are worth polling — everything else is a resting state
+// until the manual Re-index button or auto-enqueue-on-create fires again.
+const INDEX_POLLING_STATUSES = ["queued", "in_progress"]
+const INDEX_STATUS_POLL_INTERVAL_MS = 3000
+
+async function fetchIndexStatus(datasetId){
+    return adminRequest(`${window.ROOT_PATH}/admin/datasets/${datasetId}/index-status`)
+}
+
+async function triggerReindex(datasetId){
+    return adminRequest(`${window.ROOT_PATH}/admin/datasets/${datasetId}/reindex`, {
+        method: "POST",
+    })
+}
+
+/**
+ * Renders the status badge on one dataset card and, for the two "still
+ * working" statuses, starts polling (same shape as downloads.js's
+ * startCardPolling/stopCardPolling for the downloads-tab progress
+ * indicators) until it reaches a resting state.
+ * @param {HTMLElement} datasetCard
+ * @param {number} datasetId
+ */
+function renderIndexBadge(datasetCard, status){
+    const badge = datasetCard.querySelector(".index-status-badge")
+    if (!badge) return
+    badge.textContent = INDEX_STATUS_LABELS[status.status] || status.status
+    badge.className = `index-status-badge index-status-badge-${status.status}`
+    badge.title = status.status === "failed" && status.error_message ? status.error_message : ""
+}
+
+function stopIndexPolling(datasetCard){
+    if (datasetCard._indexPollHandle) {
+        clearInterval(datasetCard._indexPollHandle)
+        activeIndexPollHandles = activeIndexPollHandles.filter((h) => h !== datasetCard._indexPollHandle)
+        datasetCard._indexPollHandle = null
+    }
+}
+
+/**
+ * Fetches this dataset's current index status once, renders the badge, and
+ * — only if not already polling — starts a steady interval for as long as
+ * the status stays "queued"/"in_progress", stopping itself once it reaches
+ * a resting state. Safe to call repeatedly (e.g. right after the Re-index
+ * button fires) without stacking duplicate intervals.
+ * @param {HTMLElement} datasetCard
+ * @param {number} datasetId
+ */
+async function refreshIndexStatus(datasetCard, datasetId){
+    const result = await fetchIndexStatus(datasetId)
+    if (!result.ok) {
+        renderIndexBadge(datasetCard, { status: "never_indexed" })
+        return
+    }
+    renderIndexBadge(datasetCard, result.data)
+    if (!INDEX_POLLING_STATUSES.includes(result.data.status)) {
+        stopIndexPolling(datasetCard)
+        return
+    }
+    if (datasetCard._indexPollHandle) return
+    datasetCard._indexPollHandle = setInterval(async () => {
+        const polled = await fetchIndexStatus(datasetId)
+        if (!polled.ok) return
+        renderIndexBadge(datasetCard, polled.data)
+        if (!INDEX_POLLING_STATUSES.includes(polled.data.status)) {
+            stopIndexPolling(datasetCard)
+        }
+    }, INDEX_STATUS_POLL_INTERVAL_MS)
+    activeIndexPollHandles.push(datasetCard._indexPollHandle)
 }
 
 async function submitCategoryChange(category, url){
