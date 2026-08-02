@@ -18,13 +18,28 @@ def get_user_project_accounts(username, cluster="anvil"):
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return []
 
+    # Sub-account suffixes Slurm creates for queue-specific access, not
+    # separate storage allocations — stripping them (and de-duping via the
+    # set() below) collapses e.g. "x-foo" and "x-foo-gpu" into the one real
+    # "x-foo" project entry, same as it always has for -gpu.
+    # -ai is the counterpart for Anvil's separate "ai" partition — RCAC's
+    # own docs confirm gpu and ai are documented as separate SU-allocated
+    # queues, the same relationship -gpu already covers here, but unlike
+    # -gpu this wasn't confirmed by actually running sacctmgr against a real
+    # account showing one (no Anvil access from this environment) — treat
+    # as a well-justified inference pending a quick real-world check, not
+    # a tested fact like -gpu was.
+    QUEUE_SUB_ACCOUNT_SUFFIXES = ("-gpu", "-ai")
+
     accounts = set()
     for line in result.stdout.splitlines():
         account = line.strip().rstrip("|")
         if not account or account == "root":
             continue
-        if account.endswith("-gpu"):
-            account = account[:-len("-gpu")]
+        for suffix in QUEUE_SUB_ACCOUNT_SUFFIXES:
+            if account.endswith(suffix):
+                account = account[: -len(suffix)]
+                break
         accounts.add(account)
     return sorted(accounts)
 
