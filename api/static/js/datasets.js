@@ -806,26 +806,76 @@ function updateSelectionAmountBox(container, download_card) {
   }
 }
 
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
+
 /**
- * bytes -> a short human label ("4.2Gb", "830Kb", "512"), matching the
- * threshold/rounding convention already used for individual file sizes.
+ * bytes -> a human label with the largest unit that keeps the number under
+ * 1000 ("4.2KB", "5.5TB", "512B"). Decimal (1000-based) divisors — the
+ * convention individual file sizes already used before this was ever
+ * centralized into one helper, kept as-is rather than switching to
+ * binary/1024-based KiB/MiB and introducing a second convention.
+ *
+ * Previously capped at GB with no tier above it, so anything TB/PB-scale
+ * (routine for real research datasets once the indexing worker reports
+ * genuine totals) just showed as an oversized "5500GB"-style number
+ * instead of rolling over — that was the actual "stuck at GB" bug, found
+ * by running this function directly against realistic dataset sizes
+ * rather than assuming from the bug description alone. This also fixes a
+ * smaller boundary bug: the old fixed if/else-if chain used `>` at each
+ * threshold, so a value at exactly 1e9 fell into the MB branch and showed
+ * "1000MB" instead of "1GB"; the loop below naturally rolls over at
+ * exactly 1000 instead.
  * @param {number} bytes
  * @returns {string}
  */
 function formatBytes(bytes) {
   let value = bytes;
-  let unit = "";
-  if (value > 1000000000) {
-    value = truncateDecimals(value / 1000000000, 1);
-    unit = "Gb";
-  } else if (value > 1000000) {
-    value = truncateDecimals(value / 1000000, 1);
-    unit = "Mb";
-  } else if (value > 1000) {
-    value = truncateDecimals(value / 1000, 1);
-    unit = "Kb";
+  let unitIndex = 0;
+  while (value >= 1000 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1000;
+    unitIndex++;
   }
-  return `${value}${unit}`;
+  const rounded = unitIndex === 0 ? value : truncateDecimals(value, 1);
+  return `${rounded}${BYTE_UNITS[unitIndex]}`;
+}
+
+/**
+ * Derives download progress purely from a job status's `files` array —
+ * the one thing a polled /datasets/download/status/{id} response and this
+ * function both need, so this is the actual shared state behind both the
+ * persistent toast (showProgressToast's update()) and the Downloads-tab
+ * progress bar (downloads.js has its own copy of this same function,
+ * matching the established per-page duplication convention) — not two
+ * independently-computed progress estimates.
+ *
+ * Byte-accurate only when every entry carries a `size` (from
+ * DownloadJobStart.sizes — see buildSizesPayload above — which is only
+ * ever populated when every selected item's size was known at selection
+ * time); otherwise falls back to item-count, labeled so it's never
+ * mistaken for a byte-accurate figure. Still granular per *selected item*,
+ * not per byte transferred within a file — the backend has no mid-transfer
+ * progress to report (fs.get() is a single blocking call), so this is the
+ * finest resolution available without touching download mechanics itself.
+ * @param {Array<{path: string, status: string, size?: number}>} files
+ * @returns {{percent: number, label: string}}
+ */
+function computeDownloadProgress(files) {
+  const total = files.length || 1;
+  const doneCount = files.filter((f) => f.status === "succeeded" || f.status === "failed").length;
+  const allSizesKnown = files.length > 0 && files.every((f) => typeof f.size === "number");
+
+  if (allSizesKnown) {
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    let doneBytes = 0;
+    files.forEach((f) => {
+      if (f.status === "succeeded" || f.status === "failed") doneBytes += f.size;
+    });
+    const percent = totalBytes > 0 ? Math.min(100, Math.round((doneBytes / totalBytes) * 100)) : 0;
+    return { percent, label: `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)} · ${percent}%` };
+  }
+
+  const percent = Math.round((doneCount / total) * 100);
+  return { percent, label: `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)` };
 }
 
 /**
@@ -1082,8 +1132,7 @@ function download_file(container, download_paths, sourceName) {
       // (stays open through completion, manually dismissed — see
       // showProgressToast) tracks it instead of this now-closed modal
       closeSelector(fileSelectorOverlay);
-      const sizeInfo = summarizeSelectionSizes(download_paths);
-      const progressToast = showProgressToast(sourceName || mediumDirectory.downloadPath, sizeInfo);
+      const progressToast = showProgressToast(sourceName || mediumDirectory.downloadPath);
 
       const result = await downloadFromPath(mediumDirectory.downloadPath, download_paths, sourceName, progressToast.update);
       progressToast.finish(result);
@@ -1296,13 +1345,14 @@ async function downloadFromPath(file, paths, sourceName, onTick) {
   const fullPath = parts.join("/");
   const oodUrl = `${window.location.origin}/pun/sys/dashboard/files/fs${fullPath.split("/").map(encodeURIComponent).join("/")}`;
   const pathList = Array.from(paths.keys());
+  const sizes = buildSizesPayload(paths);
 
   let job;
   try {
     const response = await fetch(`${window.ROOT_PATH}/datasets/download/start`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: sourceName || fullPath, destination: fullPath, paths: pathList }),
+      body: JSON.stringify({ name: sourceName || fullPath, destination: fullPath, paths: pathList, sizes }),
     });
     if (!response.ok) {
       throw new Error(`HTTP error! status ${response.status}`);
@@ -1405,25 +1455,25 @@ function buildDownloadResult(status, fullPath, oodUrl) {
 }
 
 /**
- * Builds a per-item path -> size lookup from the same Map download_file
- * already has (container.downloadPaths, values shaped {type, size,
- * sizeKnown} — see the checkbox handler in makeFolderCards), plus whether
- * every selected item's size is actually known and their combined total.
- * Kept separate from showProgressToast so the "can we do byte-accurate
- * progress" decision is made once, from data that already exists, rather
- * than re-derived per poll tick.
+ * Builds the {path: bytes} payload sent to POST /datasets/download/start
+ * (DownloadJobStart.sizes) for whichever selected items had a known real
+ * size at selection time — files always, folders only if indexed (see the
+ * checkbox handler in makeFolderCards). This is the *only* place that size
+ * info exists before a download starts, so it has to be sent here to
+ * become part of the job's own persisted state rather than staying
+ * private to this page — see computeDownloadProgress below, which reads
+ * it back from the polled job status instead of a client-side closure, so
+ * a totally separate /downloads/history page load can compute the same
+ * byte-accurate progress this page's toast does.
  * @param {Map<string, {type: string, size: number, sizeKnown: boolean}>} download_paths
+ * @returns {Object<string, number>}
  */
-function summarizeSelectionSizes(download_paths) {
-  const sizeByPath = new Map();
-  let allSizesKnown = true;
-  let totalBytes = 0;
+function buildSizesPayload(download_paths) {
+  const sizes = {};
   download_paths.forEach((info, path) => {
-    sizeByPath.set(path, info);
-    if (!info.sizeKnown) allSizesKnown = false;
-    totalBytes += info.size || 0;
+    if (info.sizeKnown) sizes[path] = info.size;
   });
-  return { sizeByPath, allSizesKnown: allSizesKnown && totalBytes > 0, totalBytes };
+  return sizes;
 }
 
 /**
@@ -1434,10 +1484,9 @@ function summarizeSelectionSizes(download_paths) {
  * straight in as downloadFromPath's onTick, so this rides the exact same
  * poll loop instead of running a second one just for the toast.
  * @param {string} sourceName
- * @param {{sizeByPath: Map, allSizesKnown: boolean, totalBytes: number}} sizeInfo
  * @returns {{update: (status: Object) => void, finish: (result: Object) => void}}
  */
-function showProgressToast(sourceName, sizeInfo) {
+function showProgressToast(sourceName) {
   const toast = showToast(`Downloading "${sourceName}"…`, "success", 0);
   // showToast's type param only has success/error — remove the success
   // class it adds by default so the in-progress (amber) look below isn't
@@ -1461,37 +1510,9 @@ function showProgressToast(sourceName, sizeInfo) {
   const label = progressWrap.querySelector(".toast-progress-label");
 
   function update(status) {
-    const files = status.files || [];
-    const total = files.length || 1;
-    const doneCount = files.filter((f) => f.status === "succeeded" || f.status === "failed").length;
-
-    if (sizeInfo.allSizesKnown) {
-      // Byte-accurate: every selected item's real size was already known
-      // (from Feature 2's indexed folder sizes / pelicanfs's own per-file
-      // sizes) before this download even started. Still granular per
-      // *selected item*, not per byte transferred within a file — the
-      // backend has no mid-transfer progress to report (fs.get() is a
-      // single blocking call), so this is the finest resolution available
-      // without touching download mechanics itself.
-      let doneBytes = 0;
-      files.forEach((f) => {
-        if (f.status === "succeeded" || f.status === "failed") {
-          const info = sizeInfo.sizeByPath.get(f.path);
-          doneBytes += info ? info.size : 0;
-        }
-      });
-      const percent = Math.min(100, Math.round((doneBytes / sizeInfo.totalBytes) * 100));
-      fill.style.width = `${percent}%`;
-      label.textContent = `${formatBytes(doneBytes)} of ${formatBytes(sizeInfo.totalBytes)} · ${percent}%`;
-    } else {
-      // Fallback: at least one selected item (almost always an
-      // un-indexed folder) has no known real size, so a byte total would
-      // be a guess dressed up as a number — item-count progress instead,
-      // labeled so it's never mistaken for a byte-accurate figure.
-      const percent = Math.round((doneCount / total) * 100);
-      fill.style.width = `${percent}%`;
-      label.textContent = `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)`;
-    }
+    const { percent, label: progressLabel } = computeDownloadProgress(status.files || []);
+    fill.style.width = `${percent}%`;
+    label.textContent = progressLabel;
   }
 
   function finish(result) {

@@ -798,7 +798,17 @@ async function triggerReindex(datasetId){
 function renderIndexBadge(datasetCard, status){
     const badge = datasetCard.querySelector(".index-status-badge")
     if (!badge) return
-    badge.textContent = INDEX_STATUS_LABELS[status.status] || status.status
+    // The worker (scripts/indexing_worker.py) discovers folder structure by
+    // walking it — there's no total folder count known upfront, only a
+    // running count of how many have been visited so far (folders_done,
+    // already returned by GET /admin/datasets/{id}/index-status). So this
+    // shows real progress ("340 folders scanned") rather than a fabricated
+    // "340/812" or percentage — an honest count, not invented precision.
+    if (status.status === "in_progress" && typeof status.folders_done === "number") {
+        badge.textContent = `${INDEX_STATUS_LABELS.in_progress} ${status.folders_done} folder${status.folders_done === 1 ? "" : "s"} scanned`
+    } else {
+        badge.textContent = INDEX_STATUS_LABELS[status.status] || status.status
+    }
     badge.className = `index-status-badge index-status-badge-${status.status}`
     badge.title = status.status === "failed" && status.error_message ? status.error_message : ""
 }

@@ -203,6 +203,19 @@ a {
   min-width: 0;
 }
 
+/* Reuses .toast-progress-track/-fill/-label from toast.css directly (already
+   loaded on this page) rather than a second copy of the same bar styling —
+   this row and the persistent download toast are meant to look like the
+   same progress, not just share data. Only the wrapper's spacing is new. */
+.downloads-entry-progress-slot {
+  min-width: 0;
+}
+.downloads-entry-progress-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
 .downloads-entry-error {
   display: flex;
   align-items: flex-start;

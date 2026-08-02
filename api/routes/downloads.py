@@ -100,6 +100,16 @@ class DownloadJobStart(BaseModel):
     name: str
     destination: str
     paths: list[str]
+    # path -> size in bytes, for whichever selected paths had a known real
+    # size at selection time (see summarizeSelectionSizes in
+    # datasets.js/quick-access.js — files always, folders only if indexed).
+    # Persisted onto each file's own job-status entry below so a
+    # byte-accurate progress percentage can be computed from the *same*
+    # polled status by any page watching this job (the toast that started
+    # it, or a completely separate /downloads/history page load) — the
+    # frontend that started the download is the only place this was ever
+    # known, so it has to be sent here to be a shared, not toast-private, fact.
+    sizes: dict[str, int] | None = None
 
 
 def _create_history_record(name: str, destination: str, item_count: int) -> int:
@@ -152,14 +162,29 @@ def _update_job(job_id: str, status: str | None = None, files: list[dict] | None
         con.close()
 
 
-def _run_download_job(job_id: str, history_id: int, destination: str, paths: list[str], preserved_files: list[dict] | None = None) -> None:
+def _files_with_sizes(paths: list[str], sizes: dict[str, int] | None) -> list[dict]:
+    """Shared by _enqueue_job's initial DB row and _run_download_job's own
+    working copy — both build a fresh files list from `paths` independently
+    (the background thread doesn't read back what _enqueue_job wrote), so
+    both need to attach `size` the same way or the field would silently
+    disappear the first time _run_download_job's own list overwrites it."""
+    result = []
+    for p in paths:
+        entry = {"path": p, "status": "pending"}
+        if sizes and sizes.get(p) is not None:
+            entry["size"] = sizes[p]
+        result.append(entry)
+    return result
+
+
+def _run_download_job(job_id: str, history_id: int, destination: str, paths: list[str], preserved_files: list[dict] | None = None, sizes: dict[str, int] | None = None) -> None:
     # Runs on a background thread from _job_executor — this function is what
     # actually replaces the old request-held-open behavior. It reuses
     # download_one_file (api/routes/pelican.py) unchanged; only where it's
     # invoked from has changed.
     _update_job(job_id, status="in_progress")
 
-    files = [{"path": p, "status": "pending"} for p in paths]
+    files = _files_with_sizes(paths, sizes)
     succeeded = []
     failed = []
 
@@ -231,7 +256,7 @@ def _run_download_job(job_id: str, history_id: int, destination: str, paths: lis
     _finish_history_record(history_id, history_status, history_error_message, history_files)
 
 
-def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str], preserved_files: list[dict] | None = None) -> str:
+def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str], preserved_files: list[dict] | None = None, sizes: dict[str, int] | None = None) -> str:
     # Shared by startDownloadJob and restartDownloadRecord below — both boil
     # down to "create a download_jobs row and hand the actual transfer off to
     # a background thread", they just differ in how the history_id/paths they
@@ -240,7 +265,7 @@ def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str],
     # worker thread picks it up, entirely off the request that called this.
     job_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
-    files = [{"path": p, "status": "pending"} for p in paths]
+    files = _files_with_sizes(paths, sizes)
     with _db_write_lock:
         con = _get_connection()
         cur = con.cursor()
@@ -250,7 +275,7 @@ def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str],
         )
         con.commit()
         con.close()
-    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths, preserved_files)
+    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths, preserved_files, sizes)
     return job_id
 
 
@@ -260,7 +285,7 @@ async def startDownloadJob(payload: DownloadJobStart):
         raise HTTPException(status_code=400, detail="Select at least one file or folder first.")
 
     history_id = _create_history_record(payload.name, payload.destination, len(payload.paths))
-    job_id = _enqueue_job(history_id, payload.name, payload.destination, payload.paths)
+    job_id = _enqueue_job(history_id, payload.name, payload.destination, payload.paths, sizes=payload.sizes)
 
     return {"job_id": job_id, "history_id": history_id, "status": "pending"}
 
@@ -298,6 +323,10 @@ async def restartDownloadRecord(record_id: int):
     preserved_files = [f for f in all_files if f.get("status") == "succeeded"]
     if not retry_paths:
         raise HTTPException(status_code=400, detail="No failed files recorded for this download.")
+    # Carry sizes forward from the original attempt's stored files — a
+    # restart has no frontend request body of its own to receive them from,
+    # they're only ever known at the point a download is first started.
+    sizes = {f["path"]: f["size"] for f in all_files if f.get("size") is not None}
 
     name = row["name"]
     destination = row["destination"]
@@ -318,7 +347,7 @@ async def restartDownloadRecord(record_id: int):
         con.commit()
         con.close()
 
-    job_id = _enqueue_job(record_id, name, destination, retry_paths, preserved_files=preserved_files)
+    job_id = _enqueue_job(record_id, name, destination, retry_paths, preserved_files=preserved_files, sizes=sizes)
 
     return {"job_id": job_id, "history_id": record_id, "status": "in_progress"}
 

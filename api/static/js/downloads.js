@@ -17,6 +17,72 @@ function formatTimestamp(iso) {
   return date.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
 }
 
+const BYTE_UNITS = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+function truncateDecimals(number, digits) {
+  const multiplier = Math.pow(10, digits);
+  return Math.trunc(number * multiplier) / multiplier;
+}
+
+// Same helper as datasets.js/quick-access.js (matching this app's existing
+// per-page duplication convention rather than sharing a module across
+// pages) — decimal (1000-based) divisors, B/KB/MB/GB/TB/PB.
+function formatBytes(bytes) {
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1000 && unitIndex < BYTE_UNITS.length - 1) {
+    value /= 1000;
+    unitIndex++;
+  }
+  const rounded = unitIndex === 0 ? value : truncateDecimals(value, 1);
+  return `${rounded}${BYTE_UNITS[unitIndex]}`;
+}
+
+/**
+ * Same function as datasets.js/quick-access.js's computeDownloadProgress —
+ * duplicated here rather than shared, matching this app's established
+ * per-page JS duplication convention. Both places derive progress purely
+ * from a job status's `files` array (the thing this page and the
+ * initiating page's persistent toast both poll from
+ * /datasets/download/status/{id}), so this row and that toast are two
+ * views of the *same* polled state, not two independently-tracked
+ * estimates — confirmed by reading api/routes/downloads.py: DownloadJobStart
+ * now carries an optional `sizes` map from the page that started the
+ * download, persisted onto each file's own status entry, which is the only
+ * reason a totally separate page load like this one can compute the same
+ * byte-accurate number the toast does.
+ * @param {Array<{path: string, status: string, size?: number}>} files
+ * @returns {{percent: number, label: string}}
+ */
+function computeDownloadProgress(files) {
+  const total = files.length || 1;
+  const doneCount = files.filter((f) => f.status === "succeeded" || f.status === "failed").length;
+  const allSizesKnown = files.length > 0 && files.every((f) => typeof f.size === "number");
+
+  if (allSizesKnown) {
+    const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
+    let doneBytes = 0;
+    files.forEach((f) => {
+      if (f.status === "succeeded" || f.status === "failed") doneBytes += f.size;
+    });
+    const percent = totalBytes > 0 ? Math.min(100, Math.round((doneBytes / totalBytes) * 100)) : 0;
+    return { percent, label: `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)} · ${percent}%` };
+  }
+
+  const percent = Math.round((doneCount / total) * 100);
+  return { percent, label: `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)` };
+}
+
+function renderProgressBar(files) {
+  const { percent, label } = computeDownloadProgress(files || []);
+  return /* html */ `
+    <div class="downloads-entry-progress-wrap">
+      <div class="toast-progress-track"><div class="toast-progress-fill" style="width:${percent}%"></div></div>
+      <span class="toast-progress-label">${label}</span>
+    </div>
+  `;
+}
+
 function statusLabel(status) {
   switch (status) {
     case "complete": return "Complete";
@@ -138,6 +204,7 @@ function renderEntry(entry) {
       <span>Started ${formatTimestamp(entry.started_at)}</span>
       ${entry.finished_at ? `<span>Finished ${formatTimestamp(entry.finished_at)}</span>` : ""}
     </div>
+    ${entry.status === "in_progress" ? `<div class="downloads-entry-progress-slot">${renderProgressBar(entry.files)}</div>` : ""}
     ${entry.error_message ? `<div class="downloads-entry-error"><i class="fa fa-exclamation-circle"></i> ${escapeHtml(entry.error_message)}</div>` : ""}
     <div class="downloads-entry-files-slot">${renderFileList(entry.files)}</div>
     ${showOodLink ? `<a class="downloads-entry-ood-link" href="${buildOodUrl(entry.destination)}" target="_blank" rel="noopener noreferrer"><i class="fa fa-external-link"></i> Open in File Browser</a>` : ""}
@@ -209,14 +276,24 @@ function stopCardPolling(card) {
 }
 
 /**
- * Polls a single in-progress card's job status every 2s and swaps in the
- * live per-file list (done/not yet downloaded/failed), sourced from
- * download_jobs via the same status endpoint datasets.js/quick-access.js
- * already poll while starting a download. Stops once the job reaches a
- * terminal state, or as soon as the job 404s (its record was deleted — see
- * deleteDownloadRecord/the delete button above). Only the file disclosure is
- * updated in place — the rest of the card (badge, timestamps, OOD link)
- * still reflects what was true on last page load/Refresh, by design.
+ * Polls a single in-progress card's job status every 2s — the same
+ * /datasets/download/status/{id} endpoint datasets.js/quick-access.js's
+ * persistent toast also polls while starting a download, so this row and
+ * that toast are two views of the same underlying state, not a second
+ * independent progress-tracking path. Live-updates the file disclosure and
+ * the progress bar (via computeDownloadProgress, shared with the toast's
+ * own progress calculation) while in progress. Stops once the job reaches
+ * a terminal state, or as soon as the job 404s (its record was deleted —
+ * see deleteDownloadRecord/the delete button above).
+ *
+ * On reaching a terminal state, the whole card is re-rendered via
+ * renderEntry rather than just patching the file list — a prior version of
+ * this function left the status badge/OOD link/restart button stale until
+ * the next manual page load/Refresh (only the file disclosure updated
+ * live), which was tolerable when there was no progress bar to visibly
+ * reach 100% and then just sit there next to a badge still reading "In
+ * progress"; adding one made that staleness a real, visible bug rather
+ * than a cosmetic gap.
  * @param {HTMLElement} card
  * @param {string} jobId
  */
@@ -230,6 +307,24 @@ function startCardPolling(card, jobId) {
       }
       if (!response.ok) return;
       const job = await response.json();
+
+      if (DOWNLOAD_JOB_TERMINAL_STATUSES.includes(job.status)) {
+        stopCardPolling(card);
+        const finishedEntry = {
+          id: job.history_id,
+          name: job.name,
+          destination: job.destination,
+          status: job.status,
+          item_count: job.item_count,
+          started_at: job.started_at,
+          finished_at: job.updated_at,
+          error_message: job.error_message,
+          files: job.files,
+        };
+        card.replaceWith(renderEntry(finishedEntry));
+        return;
+      }
+
       const slot = card.querySelector(".downloads-entry-files-slot");
       if (slot) {
         // preserve whether the user had the disclosure open across the swap —
@@ -239,8 +334,9 @@ function startCardPolling(card, jobId) {
         const details = slot.querySelector("details");
         if (details && wasOpen) details.open = true;
       }
-      if (DOWNLOAD_JOB_TERMINAL_STATUSES.includes(job.status)) {
-        stopCardPolling(card);
+      const progressSlot = card.querySelector(".downloads-entry-progress-slot");
+      if (progressSlot) {
+        progressSlot.innerHTML = renderProgressBar(job.files);
       }
     } catch (error) {
       console.log("polling job status failed for", jobId, error);
