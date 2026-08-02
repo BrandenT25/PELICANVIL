@@ -1,11 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from pelicanfs import OSDFFileSystem
 from pelicanfs.exceptions import NoCredentialsException
+from aiowebdav2.exceptions import UnauthorizedError, AccessDeniedError
 import aiohttp
 import fsspec, os, json, shutil, logging
 from pathlib import Path
 from collections import defaultdict
-from api.core.pelican_auth import get_token_for_namespace
+from api.core.pelican_auth import get_token_for_namespace, log_unexpected_pelican_error
 osdf = OSDFFileSystem(direct_reads=False)
 
 logger = logging.getLogger("pelican-ui.pelican")
@@ -34,13 +35,23 @@ def _resolve_filesystem(namespace: str) -> OSDFFileSystem:
 
 def _is_auth_required(exc: Exception) -> bool:
     """True if exc means "this namespace needs a token" rather than some
-    other failure (network issue, genuine 404/500, etc). Covers both cases
-    pelicanfs's own troubleshooting docs describe: no credential discovered
-    at all (NoCredentialsException, raised by pelicanfs itself), and a
-    401/403 surfaced by the origin when a stale/invalid token is present but
-    still rejected (surfaces as aiohttp.ClientResponseError via the
-    underlying fsspec HTTPFileSystem's raise_for_status())."""
+    other failure (network issue, genuine 404/500, etc).
+
+    pelicanfs doesn't use one HTTP layer consistently, so this has to cover
+    both: `.get()` (download_one_file) goes through fsspec's HTTPFileSystem,
+    a real aiohttp.ClientResponseError from raise_for_status(). `.ls()`
+    (pelicanlistPath) goes through a *different* library entirely —
+    aiowebdav2's WebDAV client — which maps 401/403 to its own
+    UnauthorizedError/AccessDeniedError (see aiowebdav2/client.py's request
+    method), never touching aiohttp.ClientResponseError at all. Confirmed by
+    reading both installed packages' source, not assumed from docs — see
+    2026-08-01 investigation notes. NoCredentialsException covers the third
+    case: pelicanfs's own token-generation step finding no credential at all
+    before any HTTP request goes out.
+    """
     if isinstance(exc, NoCredentialsException):
+        return True
+    if isinstance(exc, (UnauthorizedError, AccessDeniedError)):
         return True
     return isinstance(exc, aiohttp.ClientResponseError) and exc.status in (401, 403)
 
@@ -87,6 +98,7 @@ def download_one_file(filepath: str, storage_location: str) -> None:
         if _is_auth_required(e):
             raise DownloadAuthRequiredError(path) from None
         logger.exception("download_one_file failed for %s -> %s", filepath, storage_location)
+        log_unexpected_pelican_error(path, e)
         raise DownloadError("Download failed. Check server logs.") from e
 
 
@@ -108,6 +120,7 @@ def pelicanlistPath(path: str):
                 },
             ) from None
         logger.exception("pelicanlistPath failed for %s", path)
+        log_unexpected_pelican_error(path, e)
         raise HTTPException(status_code=502, detail="Couldn't reach the Pelican/OSDF federation. Try again.")
 
 
