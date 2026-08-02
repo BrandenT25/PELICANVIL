@@ -159,8 +159,27 @@ async function initDatasetCatalog() {
   }
 }
 
+// Each init is independent (scroll-spy, sidebar collapse, dataset catalog
+// don't share state) — wrapping each one separately means an exception in
+// any single one can never block the others from running. Without this,
+// one broken init here silently kills everything registered after it in
+// the same handler; that's exactly what happened when a stale cached copy
+// of an older version of this file (from before the "On this page" TOC
+// column was removed) called a since-deleted buildToc() against the
+// current docs.html, which no longer has the element it expected — the
+// resulting exception aborted this whole callback before initDatasetCatalog()
+// ever ran, leaving the catalog section stuck on its static "Loading
+// catalog…" text with no error surfaced anywhere.
+function safeInit(name, fn) {
+  try {
+    fn();
+  } catch (error) {
+    console.error(`docs.js: ${name} failed to initialize`, error);
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  initScrollSpy();
-  initSidebarGroups();
-  initDatasetCatalog();
+  safeInit("initScrollSpy", initScrollSpy);
+  safeInit("initSidebarGroups", initSidebarGroups);
+  safeInit("initDatasetCatalog", initDatasetCatalog);
 });
