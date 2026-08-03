@@ -12,6 +12,122 @@
 :root {
   --accent: #cfb991;
   --accent-rgb: 207, 185, 145;
+  /* --accent-text exists alongside --accent because the tan reads fine as
+     a *fill* against near-black (dark theme) or under dark on-accent text
+     in both themes, but fails WCAG as a *foreground* (link/icon/thin
+     border) color against a light background — #cfb991 on white is only
+     ~1.9:1, well under the 3:1 UI-component floor. Dark theme keeps the
+     two identical (already passes at ~9:1) so nothing there changes;
+     light theme darkens accent-text alone. See the `:root[data-theme="light"]`
+     block below for the split. --on-accent is the inverse: text/icon color
+     for anything sitting ON a solid --accent fill (buttons, checked
+     checkboxes) — needs to stay dark in both themes since --accent itself
+     doesn't change between themes.
+  Theme tokens added 2026-08-03 for the light/dark toggle (see
+  api/static/js/theme.js) — every other stylesheet in the app keys off
+  these instead of hardcoding grays, so this one block is the whole
+  palette swap, the same way --accent already works for blind-mode. */
+  --accent-text: var(--accent);
+  --on-accent: #1a1a1a;
+
+  --bg-page: #0a0a0a;
+  --bg-panel: #000000;
+  --bg-panel-border: #121212;
+  --bg-surface: #1a1a1a;
+  --bg-sunken: #141414;
+  --bg-elevated: #1f1f1f;
+  --bg-hover: #242424;
+  --bg-raised: #2a2a2a;
+
+  --text-primary: #f5f5f5;
+  --text-secondary: #cccccc;
+  --text-muted: #999999;
+  --text-faint: #777777;
+
+  --border-default: #333333;
+  --border-strong: #444444;
+  --border-hover: #666666;
+
+  --accent-hover: #b9a476;
+  --error: #e24b4a;
+  --error-rgb: 226, 75, 74;
+  --error-light: #e88585;
+  --success: #5fae7d;
+  --success-rgb: 95, 174, 125;
+  --warning: #d9a441;
+  --warning-rgb: 217, 164, 65;
+  --info: #6babab;
+  --info-hover: #3d6363;
+  --info-light: #8fc4c4;
+  --info-rgb: 107, 171, 171;
+  --muted-rgb: 153, 153, 153;
+
+  /* Solid dark-fill buttons (file-browser-download-clear's destructive red;
+     quick-access's own teal submit button) — deliberately the same fixed
+     color in both themes rather than tracking --error/--info (which get
+     lighter in light mode, the opposite of what a solid fill needs), each
+     with the shared --on-dark-fill text color since --text-primary would
+     flip to dark in light mode and go unreadable against these
+     always-dark fills. */
+  --error-fill: #7a1f1f;
+  --error-fill-hover: #8f2626;
+  --info-fill: #3d6b6b;
+  --info-fill-hover: #3d6363;
+  --on-dark-fill: white;
+
+  --shadow-color: rgba(0, 0, 0, 0.4);
+  --overlay-color: rgba(0, 0, 0, 0.5);
+  --hover-tint: rgba(255, 255, 255, 0.04);
+}
+
+/* Light theme — flips the same layered-surface structure (page < panel <
+   surface < sunken well < hover < raised) onto a warm off-white instead of
+   near-black. Kept off-white (#f7f5f0) rather than pure #fff for --bg-page
+   so the panels/cards (#fff) still read as a step up, mirroring how
+   --bg-panel (black) sits a step below --bg-surface (#1a1a1a) in dark
+   mode. Semantic status colors (error/success/warning/info) keep their hue
+   but shift slightly for AA contrast against the lighter backgrounds —
+   verified with a WCAG contrast script during Phase 1, all pairs pass at
+   least 4.5:1 (text) or 3:1 (borders/UI). */
+:root[data-theme="light"] {
+  --accent-text: #7d5f24;
+  --on-accent: #1a1a1a;
+
+  --bg-page: #f7f5f0;
+  --bg-panel: #ffffff;
+  --bg-panel-border: #e6e1d4;
+  --bg-surface: #ffffff;
+  --bg-sunken: #f0ede4;
+  --bg-elevated: #ffffff;
+  --bg-hover: #efece2;
+  --bg-raised: #eae5d8;
+
+  --text-primary: #1a1a1a;
+  --text-secondary: #4a4438;
+  --text-muted: #5c5648;
+  --text-faint: #7a7466;
+
+  --border-default: #ddd6c5;
+  --border-strong: #cbc2aa;
+  --border-hover: #a89b7c;
+
+  --accent-hover: #6b5320;
+  --error: #c0392f;
+  --error-rgb: 192, 57, 47;
+  --error-light: #a83a30;
+  --success: #2f7d52;
+  --success-rgb: 47, 125, 82;
+  --warning: #8a5a12;
+  --warning-rgb: 138, 90, 18;
+  --info: #2f7373;
+  --info-hover: #1f4f4f;
+  --info-light: #256a6a;
+  --info-rgb: 47, 115, 115;
+  --muted-rgb: 92, 86, 72;
+
+  --shadow-color: rgba(20, 16, 8, 0.12);
+  --overlay-color: rgba(20, 16, 8, 0.35);
+  --hover-tint: rgba(20, 16, 8, 0.035);
 }
 
 /* Shared navbar — pairs with templates/partials/navbar.html. Loaded by every page.
@@ -26,7 +142,7 @@
     align-items: stretch;
     width: 100%;
     height: clamp(64px, 4px + 4.6875vw, 100px);
-    background-color: black;
+    background-color: var(--bg-panel);
     min-width: 0;
 }
 .home-navbar-left {
@@ -36,7 +152,7 @@
     align-items: center;
     gap: clamp(16px, -16px + 3.125vw, 48px);
     padding: 0 clamp(12px, -8px + 1.5625vw, 24px);
-    background-color: black;
+    background-color: var(--bg-panel);
 }
 .home-navbar-right {
     flex: 1 2 0;
@@ -67,7 +183,7 @@
     font-family: Poppins, sans-serif;
     font-weight: 600;
     font-size: clamp(18px, 10px + 1.2vw, 28px);
-    color: white;
+    color: var(--text-primary);
     letter-spacing: -0.01em;
     white-space: nowrap;
 }
@@ -89,27 +205,28 @@
     white-space: nowrap;
     font-family: Poppins, sans-serif;
     font-size: clamp(13px, 3.33px + 0.9115vw, 22px);
-    color: white;
+    color: var(--text-primary);
     text-decoration: none;
     padding: 6px 2px;
     border-bottom: 2px solid transparent;
     transition: color 0.15s ease, border-bottom-color 0.15s ease;
 }
 .navbar-link:hover {
-    color: var(--accent);
-    border-bottom-color: var(--accent);
+    color: var(--accent-text);
+    border-bottom-color: var(--accent-text);
 }
 .navbar-downloads-link {
     /* same weight/sizing/padding/hover mechanics as .navbar-link — color is
        necessarily different since this one sits on the tan background
-       (.home-navbar-right) instead of black, so white/tan would be unreadable
-       or invisible on hover; #1a1a1a matches the existing on-tan convention
-       used elsewhere (e.g. .directory-download-button) */
+       (.home-navbar-right) instead of --bg-panel, so text-primary/accent
+       would be unreadable or invisible on hover; --on-accent matches the
+       existing on-tan convention used elsewhere (e.g.
+       .directory-download-button) */
     flex-shrink: 0;
     white-space: nowrap;
     font-family: Poppins, sans-serif;
     font-size: clamp(13px, 3.33px + 0.9115vw, 22px);
-    color: #1a1a1a;
+    color: var(--on-accent);
     text-decoration: none;
     padding: 6px 2px;
     border-bottom: 2px solid transparent;
@@ -118,7 +235,7 @@
 }
 .navbar-downloads-link:hover {
     opacity: 1;
-    border-bottom-color: #1a1a1a;
+    border-bottom-color: var(--on-accent);
 }
 .navbar-purdue-logo {
     display: flex;
@@ -129,6 +246,46 @@
     display: block;
     height: clamp(30px, 7.33px + 2.083vw, 50px);
     width: auto;
+}
+/* Sits on the tan .home-navbar-right background, so it uses --on-accent
+   like .navbar-downloads-link right next to it, not --text-primary. Both
+   icons are always in the DOM; only one is ever displayed, picked by the
+   data-theme attribute theme.js sets on <html> — this shows the icon for
+   the theme a click will switch TO (sun while dark, moon while light),
+   the same convention most dark/light toggles use. */
+.theme-toggle {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: clamp(28px, 16px + 1.25vw, 38px);
+    height: clamp(28px, 16px + 1.25vw, 38px);
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: none;
+    color: var(--on-accent);
+    opacity: 0.75;
+    cursor: pointer;
+    transition: opacity 0.15s ease, background-color 0.15s ease;
+}
+.theme-toggle:hover {
+    opacity: 1;
+    background-color: rgba(0, 0, 0, 0.08);
+}
+.theme-toggle-icon {
+    display: none;
+    width: clamp(15px, 10px + 0.65vw, 19px);
+    height: clamp(15px, 10px + 0.65vw, 19px);
+}
+.theme-toggle-icon-sun {
+    display: block;
+}
+:root[data-theme="light"] .theme-toggle-icon-sun {
+    display: none;
+}
+:root[data-theme="light"] .theme-toggle-icon-moon {
+    display: block;
 }
 @media (max-width: 700px) {
     .home-navbar-right {

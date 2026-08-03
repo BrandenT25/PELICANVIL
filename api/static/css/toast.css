@@ -13,12 +13,12 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  background-color: #1a1a1a;
-  border: 1px solid #333;
-  border-left: 3px solid #e24b4a;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--error);
   border-radius: 8px;
   padding: 12px 14px;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 16px var(--shadow-color);
   opacity: 0;
   transform: translateY(8px);
   transition: opacity 0.2s ease, transform 0.2s ease;
@@ -28,7 +28,7 @@
   transform: translateY(0);
 }
 .toast-success {
-  border-left-color: #5fae7d;
+  border-left-color: var(--success);
 }
 /* In-progress is a third state alongside toast.js's existing success/error
    (amber, matching the "still working" color already used for indexing
@@ -36,18 +36,18 @@
    toast (see showProgressToast in datasets.js/quick-access.js), removed
    again once the download reaches a terminal state. */
 .toast-inprogress {
-  border-left-color: #d9a441;
+  border-left-color: var(--warning);
 }
 .toast-inprogress .toast-icon {
-  color: #d9a441;
+  color: var(--warning);
 }
 .toast-icon {
   flex-shrink: 0;
   margin-top: 2px;
-  color: #e24b4a;
+  color: var(--error);
 }
 .toast-success .toast-icon {
-  color: #5fae7d;
+  color: var(--success);
 }
 .toast-body {
   flex: 1;
@@ -57,7 +57,7 @@
   gap: 6px;
 }
 .toast-message {
-  color: #f5f5f5;
+  color: var(--text-primary);
   font-family: Poppins, sans-serif;
   font-size: 0.85rem;
   line-height: 1.4;
@@ -68,7 +68,7 @@
   background: none;
   border: none;
   padding: 0;
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: Poppins, sans-serif;
   font-size: 0.8rem;
   font-weight: 600;
@@ -76,18 +76,18 @@
   cursor: pointer;
 }
 .toast-action:hover {
-  color: #b9a476;
+  color: var(--accent-hover);
 }
 .toast-close {
   flex-shrink: 0;
-  color: #888;
+  color: var(--text-muted);
   cursor: pointer;
   font-size: 1.1rem;
   line-height: 1;
   transition: color 0.15s ease;
 }
 .toast-close:hover {
-  color: #f5f5f5;
+  color: var(--text-primary);
 }
 
 .toast-progress-wrap {
@@ -99,24 +99,24 @@
   width: 100%;
   height: 4px;
   border-radius: 999px;
-  background-color: #333;
+  background-color: var(--bg-raised);
   overflow: hidden;
 }
 .toast-progress-fill {
   height: 100%;
   width: 0%;
-  background-color: #d9a441;
+  background-color: var(--warning);
   border-radius: 999px;
   transition: width 0.3s ease;
 }
 .toast-success .toast-progress-fill {
-  background-color: #5fae7d;
+  background-color: var(--success);
 }
 .toast-error .toast-progress-fill {
-  background-color: #e24b4a;
+  background-color: var(--error);
 }
 .toast-progress-label {
-  color: #999;
+  color: var(--text-muted);
   font-family: Poppins, sans-serif;
   font-size: 0.72rem;
 }

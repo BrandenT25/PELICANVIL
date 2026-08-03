@@ -10,7 +10,7 @@ a {
 }
 
 .downloads-page {
-  background-color: #0a0a0a;
+  background-color: var(--bg-page);
   margin-top: clamp(64px, 4px + 4.6875vw, 100px);
   min-height: 100vh;
   width: 100%;
@@ -38,12 +38,12 @@ a {
   font-family: Poppins, sans-serif;
   font-weight: 600;
   font-size: clamp(1.5rem, 1.2rem + 1vw, 2rem);
-  color: white;
+  color: var(--text-primary);
 }
 .downloads-page-subtitle {
   font-family: Poppins, sans-serif;
   font-size: clamp(0.85rem, 0.8rem + 0.15vw, 0.95rem);
-  color: #999;
+  color: var(--text-muted);
 }
 .downloads-refresh-button {
   display: flex;
@@ -51,8 +51,8 @@ a {
   gap: 8px;
   flex-shrink: 0;
   background-color: transparent;
-  border: 1px solid #444;
-  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  color: var(--accent-text);
   font-family: Poppins, sans-serif;
   font-size: 0.85rem;
   font-weight: 600;
@@ -63,7 +63,7 @@ a {
 }
 .downloads-refresh-button:hover {
   background-color: rgba(var(--accent-rgb), 0.12);
-  border-color: var(--accent);
+  border-color: var(--accent-text);
 }
 
 .downloads-list {
@@ -76,8 +76,8 @@ a {
 }
 
 .downloads-entry {
-  background-color: #1a1a1a;
-  border: 1px solid #333;
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-default);
   border-radius: 10px;
   padding: 1rem 1.25rem;
   display: flex;
@@ -97,7 +97,7 @@ a {
   font-family: Poppins, sans-serif;
   font-weight: 600;
   font-size: clamp(0.95rem, 0.9rem + 0.2vw, 1.05rem);
-  color: white;
+  color: var(--text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -125,7 +125,7 @@ a {
   flex-shrink: 0;
   background: transparent;
   border: none;
-  color: #777;
+  color: var(--text-faint);
   font-size: 0.85rem;
   padding: 6px;
   border-radius: 6px;
@@ -133,8 +133,8 @@ a {
   transition: color 0.15s ease, background-color 0.15s ease;
 }
 .downloads-entry-delete:hover {
-  color: #e24b4a;
-  background-color: rgba(226, 75, 74, 0.12);
+  color: var(--error);
+  background-color: rgba(var(--error-rgb), 0.12);
 }
 .downloads-entry-delete:disabled {
   opacity: 0.5;
@@ -146,8 +146,8 @@ a {
   gap: 6px;
   flex-shrink: 0;
   background: transparent;
-  border: 1px solid #444;
-  color: var(--accent);
+  border: 1px solid var(--border-strong);
+  color: var(--accent-text);
   font-family: Poppins, sans-serif;
   font-size: 0.78rem;
   font-weight: 600;
@@ -158,7 +158,7 @@ a {
   transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
 }
 .downloads-entry-restart:hover {
-  border-color: var(--accent);
+  border-color: var(--accent-text);
   background-color: rgba(var(--accent-rgb), 0.12);
 }
 .downloads-entry-restart:disabled {
@@ -166,29 +166,29 @@ a {
   cursor: default;
 }
 .downloads-entry-status-complete {
-  color: #5fae7d;
-  background-color: rgba(95, 174, 125, 0.14);
+  color: var(--success);
+  background-color: rgba(var(--success-rgb), 0.14);
 }
 .downloads-entry-status-partial {
   /* deliberately not the tan accent — this badge sits right above an
      "Open in File Browser" link that IS tan, and reusing the accent here
      made the badge read as clickable at a glance during self-review */
-  color: #d9a441;
-  background-color: rgba(217, 164, 65, 0.14);
+  color: var(--warning);
+  background-color: rgba(var(--warning-rgb), 0.14);
 }
 .downloads-entry-status-failed {
-  color: #e24b4a;
-  background-color: rgba(226, 75, 74, 0.14);
+  color: var(--error);
+  background-color: rgba(var(--error-rgb), 0.14);
 }
 .downloads-entry-status-in_progress {
-  color: #999;
-  background-color: rgba(153, 153, 153, 0.14);
+  color: var(--text-muted);
+  background-color: rgba(var(--muted-rgb), 0.14);
 }
 
 .downloads-entry-destination {
   font-family: Poppins, sans-serif;
   font-size: 0.8rem;
-  color: #999;
+  color: var(--text-muted);
   overflow-wrap: anywhere;
   min-width: 0;
 }
@@ -199,7 +199,7 @@ a {
   gap: 4px 16px;
   font-family: Poppins, sans-serif;
   font-size: 0.75rem;
-  color: #777;
+  color: var(--text-faint);
   min-width: 0;
 }
 
@@ -222,7 +222,7 @@ a {
   gap: 8px;
   font-family: Poppins, sans-serif;
   font-size: 0.8rem;
-  color: #e24b4a;
+  color: var(--error);
   line-height: 1.4;
 }
 
@@ -239,7 +239,7 @@ a {
   width: fit-content;
   list-style: none;
   cursor: pointer;
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: Poppins, sans-serif;
   font-size: 0.8rem;
   font-weight: 600;
@@ -255,14 +255,14 @@ a {
   flex-shrink: 0;
   border-style: solid;
   border-width: 4px 0 4px 6px;
-  border-color: transparent transparent transparent var(--accent);
+  border-color: transparent transparent transparent var(--accent-text);
   transition: transform 0.15s ease;
 }
 .downloads-entry-files[open] .downloads-entry-files-summary::before {
   transform: rotate(90deg);
 }
 .downloads-entry-files-summary:hover {
-  color: #b9a476;
+  color: var(--accent-hover);
 }
 .downloads-entry-files-list {
   display: flex;
@@ -271,8 +271,8 @@ a {
   margin-top: 8px;
   padding: 10px 12px;
   list-style: none;
-  background-color: #141414;
-  border: 1px solid #2a2a2a;
+  background-color: var(--bg-sunken);
+  border: 1px solid var(--bg-raised);
   border-radius: 8px;
   max-height: 220px;
   overflow-y: auto;
@@ -285,7 +285,7 @@ a {
   min-width: 0;
   font-family: Poppins, sans-serif;
   font-size: 0.78rem;
-  color: #ccc;
+  color: var(--text-secondary);
 }
 .downloads-entry-file span {
   overflow: hidden;
@@ -298,13 +298,13 @@ a {
   font-size: 0.7rem;
 }
 .downloads-entry-file-succeeded .fa {
-  color: #5fae7d;
+  color: var(--success);
 }
 .downloads-entry-file-failed .fa {
-  color: #e24b4a;
+  color: var(--error);
 }
 .downloads-entry-file-pending .fa {
-  color: #999;
+  color: var(--text-muted);
 }
 
 .downloads-entry-ood-link {
@@ -312,7 +312,7 @@ a {
   align-items: center;
   gap: 8px;
   align-self: flex-start;
-  color: var(--accent);
+  color: var(--accent-text);
   font-family: Poppins, sans-serif;
   font-size: 0.82rem;
   font-weight: 600;
@@ -320,7 +320,7 @@ a {
   transition: color 0.15s ease;
 }
 .downloads-entry-ood-link:hover {
-  color: #b9a476;
+  color: var(--accent-hover);
 }
 
 .downloads-empty-state {
@@ -332,16 +332,16 @@ a {
   gap: 0.75rem;
   padding: 4rem 1rem;
   text-align: center;
-  color: #999;
+  color: var(--text-muted);
 }
 .downloads-empty-state-icon {
   font-size: 2.5rem;
-  color: #444;
+  color: var(--border-strong);
 }
 .downloads-empty-state-text {
   font-family: Poppins, sans-serif;
   font-size: clamp(0.9rem, 0.85rem + 0.15vw, 1rem);
-  color: #999;
+  color: var(--text-muted);
   max-width: 420px;
 }
 

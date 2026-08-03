@@ -14,8 +14,8 @@ a {
     }
 }
 body {
-  background-color: #0a0a0a;
-  color: #f5f5f5;
+  background-color: var(--bg-page);
+  color: var(--text-primary);
   min-height: 100vh;
 }
 
@@ -70,10 +70,10 @@ body {
     font-size: clamp(2.1875rem, 1.0156rem + 3.75vw, 3.125rem);
     font-weight: 600;
     line-height: 1.2;
-    color: #f5f5f5;
+    color: var(--text-primary);
 }
 .hero-accent {
-    color: var(--accent);
+    color: var(--accent-text);
 }
 .hero-subtitle {
     display: flex;
@@ -85,12 +85,12 @@ body {
 .hero-subtitle-icon {
     flex-shrink: 0;
     font-size: clamp(1.75rem, 0.8125rem + 3vw, 2.5rem);
-    color: var(--accent);
+    color: var(--accent-text);
     line-height: 1;
 }
 .hero-subtitle-text {
     font-size: clamp(1.09375rem, 0.5078rem + 1.875vw, 1.5625rem);
-    color: #aaa;
+    color: var(--text-secondary);
     min-width: 0;
 }
 /* #endregion */
@@ -108,15 +108,15 @@ body {
     align-items: flex-start;
     gap: 2rem;
     padding: 2rem;
-    background-color: #1a1a1a;
-    border: 1px solid #333;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-default);
     border-radius: 10px;
     min-width: 0;
     transition: border-color 0.2s ease, background-color 0.2s ease, transform 0.2s ease;
 }
 .cta-card:hover {
-    border-color: var(--accent);
-    background-color: #202020;
+    border-color: var(--accent-text);
+    background-color: var(--bg-elevated);
     transform: translateY(-2px);
 }
 .cta-card-icon {
@@ -143,12 +143,12 @@ body {
     gap: 0.75rem;
     font-size: clamp(1.53125rem, 0.7109rem + 2.625vw, 2.1875rem);
     font-weight: 600;
-    color: #f5f5f5;
+    color: var(--text-primary);
     min-width: 0;
 }
 .cta-card-arrow {
     flex-shrink: 0;
-    color: var(--accent);
+    color: var(--accent-text);
     transition: transform 0.2s ease;
 }
 .cta-card:hover .cta-card-arrow {
@@ -158,15 +158,15 @@ body {
     margin-top: 0.75rem;
     font-size: clamp(1.09375rem, 0.5078rem + 1.875vw, 1.5625rem);
     line-height: 1.5;
-    color: #aaa;
+    color: var(--text-secondary);
     min-width: 0;
 }
 /* #endregion */
 
 /* #region Category panel */
 .datasets-panel {
-    background-color: #141414;
-    border: 1px solid #333;
+    background-color: var(--bg-sunken);
+    border: 1px solid var(--border-default);
     border-radius: 10px;
     padding: 2rem;
     min-width: 0;
@@ -174,13 +174,13 @@ body {
 .datasets-panel-title {
     font-size: clamp(1.53125rem, 0.7109rem + 2.625vw, 2.1875rem);
     font-weight: 600;
-    color: #f5f5f5;
+    color: var(--text-primary);
 }
 .datasets-panel-description {
     margin-top: 0.5rem;
     font-size: clamp(0.984375rem, 0.4570rem + 1.6875vw, 1.40625rem);
     line-height: 1.5;
-    color: #888;
+    color: var(--text-muted);
 }
 .category-list {
     display: flex;
@@ -194,15 +194,15 @@ body {
     align-items: center;
     gap: 1rem;
     padding: 1rem 1.25rem;
-    background-color: #1a1a1a;
-    border: 1px solid #333;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-default);
     border-radius: 8px;
     min-width: 0;
     transition: border-color 0.2s ease, background-color 0.2s ease;
 }
 .category-card:hover {
-    border-color: var(--accent);
-    background-color: #202020;
+    border-color: var(--accent-text);
+    background-color: var(--bg-elevated);
 }
 .category-card-icon {
     flex-shrink: 0;
@@ -210,6 +210,14 @@ body {
     height: 3.25rem;
     object-fit: contain;
     border-radius: 8px;
+}
+/* The category icon images (climate/machine-learning/physics/genomics) are
+   flat white line-art on a transparent background — baked for the dark
+   theme, invisible against a light page. Found during the light-theme
+   coverage pass; inverting is a one-line fix for flat single-color art
+   instead of needing a second set of icon assets. */
+:root[data-theme="light"] .category-card-icon {
+    filter: invert(1);
 }
 .category-card-text {
     flex: 1;
@@ -219,16 +227,16 @@ body {
     white-space: nowrap;
     font-size: clamp(1.2rem, 0.7rem + 0.625vw, 1.5rem);
     font-weight: 500;
-    color: #e0e0e0;
+    color: var(--text-secondary);
 }
 .category-card-chevron {
     flex-shrink: 0;
     font-size: 1.5rem;
-    color: #666;
+    color: var(--text-faint);
     transition: color 0.2s ease, transform 0.2s ease;
 }
 .category-card:hover .category-card-chevron {
-    color: var(--accent);
+    color: var(--accent-text);
     transform: translateX(3px);
 }
 /* #endregion */
@@ -246,23 +254,23 @@ body {
        10rem that left ~90px of dead space above the bar at desktop widths. */
     margin: calc(clamp(64px, 4px + 4.6875vw, 100px) + 1.5rem) auto 0;
     padding: 1rem clamp(2rem, 1vw + 1.5rem, 5rem);
-    border-left: 3px solid var(--accent);
+    border-left: 3px solid var(--accent-text);
     background-color: rgba(var(--accent-rgb), 0.06);
     min-width: 0;
 }
 .dataset-overview-icon {
     flex-shrink: 0;
     font-size: 1.25rem;
-    color: var(--accent);
+    color: var(--accent-text);
 }
 .dataset-overview-text {
-    color: #ccc;
+    color: var(--text-secondary);
     font-size: clamp(0.9rem, 0.75rem + 0.4vw, 1rem);
     line-height: 1.5;
     min-width: 0;
 }
 .dataset-overview-text strong {
-    color: #f5f5f5;
+    color: var(--text-primary);
     font-weight: 600;
 }
 /* #endregion */
@@ -272,26 +280,26 @@ body {
     max-width: 120rem;
     margin: 0 auto 4rem;
     padding: 2rem clamp(2rem, 1vw + 1.5rem, 5rem);
-    background-color: #141414;
-    border-top: 1px solid #333;
-    border-bottom: 1px solid #333;
+    background-color: var(--bg-sunken);
+    border-top: 1px solid var(--border-default);
+    border-bottom: 1px solid var(--border-default);
     min-width: 0;
 }
 .pelican-credit-title {
     font-size: clamp(1.25rem, 0.9rem + 0.9vw, 1.625rem);
     font-weight: 600;
-    color: #f5f5f5;
+    color: var(--text-primary);
 }
 .pelican-credit-description {
     margin-top: 0.5rem;
     max-width: 60rem;
     font-size: clamp(0.9rem, 0.75rem + 0.4vw, 1rem);
     line-height: 1.5;
-    color: #999;
+    color: var(--text-muted);
     min-width: 0;
 }
 .pelican-credit-description .pelican-credit-link {
-    color: var(--accent);
+    color: var(--accent-text);
     text-decoration: underline;
     text-underline-offset: 2px;
 }
@@ -307,19 +315,19 @@ body {
     align-items: center;
     gap: 0.5rem;
     padding: 0.5rem 1rem;
-    background-color: #1a1a1a;
-    border: 1px solid #333;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border-default);
     border-radius: 20px;
-    color: #e0e0e0;
+    color: var(--text-secondary);
     font-size: 0.85rem;
     font-weight: 500;
     transition: border-color 0.15s ease, color 0.15s ease;
 }
 .pelican-credit-pill i {
-    color: var(--accent);
+    color: var(--accent-text);
 }
 .pelican-credit-pill:hover {
-    border-color: var(--accent);
-    color: var(--accent);
+    border-color: var(--accent-text);
+    color: var(--accent-text);
 }
 /* #endregion */

@@ -1,6 +1,7 @@
 <!doctype html>
 <html>
   <head>
+    <script>(function(){try{if(localStorage.getItem("pelican-ui-theme")==="light"){document.documentElement.setAttribute("data-theme","light");}}catch(e){}})();</script>
     <title>Home | Pelican-UI</title>
     {% if BLIND_MODE %}
     <link rel="icon" type="image/svg+xml" href="{{ROOT_URL}}/api/static/img/blind-mode-favicon.svg">
@@ -17,6 +18,7 @@
     {% if BLIND_MODE %}
     <link rel="stylesheet" href="{{ ROOT_URL }}/api/static/css/blind-mode.css">
     {% endif %}
+    <script src="{{ ROOT_URL }}/api/static/js/theme.js" defer></script>
   </head>
   <body>
     {% include "partials/navbar.html" %}
