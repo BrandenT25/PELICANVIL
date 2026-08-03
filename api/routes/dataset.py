@@ -13,7 +13,7 @@ def _indexed_sizes_by_path() -> dict:
     """dataset.path -> total size in bytes, from the indexing worker's
     dataset_folder_sizes table — a dataset's own row (folder_path == its own
     root path) already *is* the recursive total, see
-    scripts/indexing_worker.py's _write_folder_sizes. Table may not exist
+    scripts/indexing_worker.py's _finalize_folder_sizes. Table may not exist
     yet on a fresh deployment (created lazily on the worker's first
     successful run) — that's not an error, just "nothing indexed yet"."""
     try:

@@ -65,7 +65,28 @@ RENEWAL_MARGIN_MINUTES = 60
 SBATCH_SCRIPT = Path(__file__).resolve().parent / "indexing_worker.sbatch"
 
 
-def _index_dataset(entry: dict) -> tuple[dict[str, int], int]:
+_STAGING_BATCH_SIZE = 200
+_STAGING_TABLE_SQL = """CREATE TABLE IF NOT EXISTS dataset_folder_sizes_staging (
+    dataset_id INTEGER NOT NULL,
+    folder_path TEXT NOT NULL,
+    size_bytes INTEGER NOT NULL,
+    PRIMARY KEY (dataset_id, folder_path)
+)"""
+
+
+def _count_staged(dataset_id: int) -> int:
+    con = sqlite3.connect(DB_PATH)
+    try:
+        con.execute(_STAGING_TABLE_SQL)
+        row = con.execute(
+            "SELECT COUNT(*) FROM dataset_folder_sizes_staging WHERE dataset_id = ?", (dataset_id,)
+        ).fetchone()
+        return row[0]
+    finally:
+        con.close()
+
+
+def _index_dataset(entry: dict) -> int:
     """Sequentially, recursively lists entry['path'] via pelicanfs, summing
     per-folder byte totals as it goes. Never issues concurrent listing calls
     — per the mentor directive driving this whole design ("we should not use
@@ -78,43 +99,94 @@ def _index_dataset(entry: dict) -> tuple[dict[str, int], int]:
     since this is federated, not local), so it's never used here; only file
     sizes and the recursively-computed subtotal of each directory are summed.
 
-    Returns (folder_path -> total_size_bytes, folders_visited_count).
+    Each completed folder is streamed to a `dataset_folder_sizes_staging`
+    table (batched every _STAGING_BATCH_SIZE rows) instead of being kept in
+    a path->size dict for the whole walk — that in-memory dict was the OOM
+    source on deep datasets like GOES (hundreds of thousands of folders held
+    for the entire multi-hour walk). The write buffer bounds memory to a
+    fixed size regardless of total folders visited; only the current
+    recursion's stack (bounded by directory depth) and the small buffer are
+    ever held.
+
+    Resumability: before listing a directory, checks the staging table (not
+    memory) for a size already recorded there by a prior crashed run of this
+    same dataset_id, and uses it instead of re-listing. walk() only writes a
+    folder after all of its children are done (post-order), so a staged
+    entry for a path guarantees that path's whole subtree already finished
+    before the crash — safe to trust and skip.
+
+    Returns folders_visited_count; per-folder sizes live in the staging
+    table for _finalize_folder_sizes to pick up.
     """
     fs = _resolve_filesystem(entry["path"])
-    folder_sizes: dict[str, int] = {}
+    dataset_id = entry["dataset_id"]
+    con = sqlite3.connect(DB_PATH)
+    con.execute(_STAGING_TABLE_SQL)
     folders_visited = 0
+    buffer: list[tuple[int, str, int]] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        con.executemany(
+            "INSERT OR REPLACE INTO dataset_folder_sizes_staging (dataset_id, folder_path, size_bytes) VALUES (?, ?, ?)",
+            buffer,
+        )
+        con.commit()
+        buffer.clear()
+
+    def staged_size(path: str) -> int | None:
+        row = con.execute(
+            "SELECT size_bytes FROM dataset_folder_sizes_staging WHERE dataset_id = ? AND folder_path = ?",
+            (dataset_id, path.rstrip("/")),
+        ).fetchone()
+        return row[0] if row else None
 
     def walk(path: str) -> int:
         nonlocal folders_visited
+        cached = staged_size(path)
+        if cached is not None:
+            folders_visited += 1
+            update_progress(dataset_id, folders_visited)
+            return cached
+
         total = 0
         for item in fs.ls(path):
             if item["type"] == "directory":
                 total += walk(item["name"])
             else:
                 total += item.get("size") or 0
-        folder_sizes[path.rstrip("/")] = total
         folders_visited += 1
-        update_progress(entry["dataset_id"], folders_visited)
+        buffer.append((dataset_id, path.rstrip("/"), total))
+        if len(buffer) >= _STAGING_BATCH_SIZE:
+            flush()
+        update_progress(dataset_id, folders_visited)
         return total
 
-    walk(entry["path"])
-    return folder_sizes, folders_visited
+    try:
+        walk(entry["path"])
+        flush()
+    finally:
+        con.close()
+
+    return folders_visited
 
 
-def _write_folder_sizes(dataset_id: int, folder_sizes: dict[str, int]) -> None:
-    """The one write to the catalog db for the whole job — deliberately a
-    single transaction at the end, not incremental writes during the walk,
-    to minimize contention with the catalog db's other occasional writers
-    (the per-user admin CRUD panel, api/routes/database.py). The dataset's
-    own total is just the row for its own root path — there's no separate
-    "total" column, since Phase 0 found the requirement is genuinely
-    per-folder data, and the root-path row already *is* the total.
+def _finalize_folder_sizes(dataset_id: int) -> None:
+    """The one write to the *real* catalog table for the whole job —
+    deliberately a single transaction at the end, copying the dataset's
+    now-complete staged rows over and clearing staging, to minimize
+    contention with the catalog db's other occasional writers (the per-user
+    admin CRUD panel, api/routes/database.py). Everything that happened
+    during the walk itself went to the separate staging table, not this one.
+    The dataset's own total is just the row for its own root path — there's
+    no separate "total" column, since Phase 0 found the requirement is
+    genuinely per-folder data, and the root-path row already *is* the total.
     """
     now = datetime.now(timezone.utc).isoformat()
     con = sqlite3.connect(DB_PATH)
     try:
-        cur = con.cursor()
-        cur.execute(
+        con.execute(
             """CREATE TABLE IF NOT EXISTS dataset_folder_sizes (
                 dataset_id INTEGER NOT NULL,
                 folder_path TEXT NOT NULL,
@@ -123,11 +195,15 @@ def _write_folder_sizes(dataset_id: int, folder_sizes: dict[str, int]) -> None:
                 PRIMARY KEY (dataset_id, folder_path)
             )"""
         )
-        cur.execute("DELETE FROM dataset_folder_sizes WHERE dataset_id = ?", (dataset_id,))
-        cur.executemany(
-            "INSERT INTO dataset_folder_sizes (dataset_id, folder_path, size_bytes, indexed_at) VALUES (?, ?, ?, ?)",
-            [(dataset_id, path, size, now) for path, size in folder_sizes.items()],
+        con.execute(_STAGING_TABLE_SQL)
+        con.execute("DELETE FROM dataset_folder_sizes WHERE dataset_id = ?", (dataset_id,))
+        con.execute(
+            """INSERT INTO dataset_folder_sizes (dataset_id, folder_path, size_bytes, indexed_at)
+               SELECT dataset_id, folder_path, size_bytes, ?
+               FROM dataset_folder_sizes_staging WHERE dataset_id = ?""",
+            (now, dataset_id),
         )
+        con.execute("DELETE FROM dataset_folder_sizes_staging WHERE dataset_id = ?", (dataset_id,))
         con.commit()
     finally:
         con.close()
@@ -168,8 +244,8 @@ def main() -> None:
 
         logger.info("Indexing dataset_id=%s path=%s", entry["dataset_id"], entry["path"])
         try:
-            folder_sizes, folders_visited = _index_dataset(entry)
-            _write_folder_sizes(entry["dataset_id"], folder_sizes)
+            folders_visited = _index_dataset(entry)
+            _finalize_folder_sizes(entry["dataset_id"])
             mark_complete(entry["dataset_id"], folders_visited)
             logger.info("Completed dataset_id=%s (%d folders)", entry["dataset_id"], folders_visited)
         except Exception as e:
@@ -178,7 +254,23 @@ def main() -> None:
             else:
                 message = str(e) or type(e).__name__
             logger.exception("Indexing failed for dataset_id=%s", entry["dataset_id"])
-            mark_failed(entry["dataset_id"], message)
+            # Nothing is lost on a mid-walk crash: every folder finished so
+            # far was already streamed to dataset_folder_sizes_staging (see
+            # _index_dataset), not held in memory. Surface that here instead
+            # of letting it sit as a silent mystery, and leave it in place —
+            # the next claim of this dataset_id resumes from it rather than
+            # re-walking from scratch.
+            partial_count = _count_staged(entry["dataset_id"])
+            if partial_count:
+                message += (
+                    f" ({partial_count} folders already indexed and saved to staging —"
+                    " will resume from there on retry.)"
+                )
+                logger.info(
+                    "Partial progress preserved for dataset_id=%s: %d folders staged",
+                    entry["dataset_id"], partial_count,
+                )
+            mark_failed(entry["dataset_id"], message, folders_done=partial_count or None)
             # No re-raise: a failed job must not take the worker process down
             # with it — the loop goes back to idling and stays able to pick
             # up the next queued entry, per Phase 1's failure-handling spec.
