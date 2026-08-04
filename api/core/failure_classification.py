@@ -30,7 +30,7 @@ from aiowebdav2.exceptions import (
     NoConnectionError,
     ConnectionExceptionError,
 )
-from pelicanfs.exceptions import NoCredentialsException
+from pelicanfs.exceptions import NoCredentialsException, BadDirectorResponse
 
 
 def _is_auth_required(exc: Exception) -> bool:
@@ -66,6 +66,7 @@ _CONNECTION_ERROR_TYPES = (
     aiohttp.ClientConnectionError,
     TimeoutError,
     asyncio.CancelledError,
+    BadDirectorResponse,
 )
 
 
@@ -91,7 +92,12 @@ def _is_connection_error(exc: BaseException) -> bool:
     shape as NoConnectionError, just a different aiowebdav2 wrapper.
     aiohttp.ClientConnectionError: the direct aiohttp exception, for any
     call path that isn't routed through aiowebdav2's wrapping (e.g. a
-    download's .get() call, which goes through aiohttp directly).
+    download's .get() call, which goes through aiohttp directly). This
+    already covers aiohttp.ClientConnectorError (the "Connect call failed"/
+    OSError wrapper seen in the 2026-08-04 production run's dataset_id=17
+    failure) by inheritance — ClientConnectorError -> ClientOSError ->
+    ClientConnectionError, confirmed directly against the installed
+    aiohttp version, not assumed. No separate entry needed for it.
     TimeoutError: covers both Python's builtin TimeoutError (which
     asyncio.TimeoutError is an alias for since 3.11, and which fsspec's own
     FSTimeoutError subclasses) and aiohttp's ServerTimeoutError/
@@ -103,6 +109,29 @@ def _is_connection_error(exc: BaseException) -> bool:
     CancelledError) — a BaseException, not an Exception, so it needs its
     own explicit inclusion; a caller checking this function needs to catch
     BaseException, not just Exception, to ever see one to classify.
+    pelicanfs.exceptions.BadDirectorResponse: added 2026-08-04. Structurally
+    different from the others above — read directly from pelicanfs/core.py's
+    get_dirlist_url(): this is only raised *after* the Director's PROPFIND
+    request already completed successfully (inside the `async with
+    session.request(...) as resp:` block), when the response is missing an
+    expected "Link" header. It's a malformed/unexpected response from a
+    Director that *was* reached, not a network-reachability failure the
+    way every other entry here is — a genuine connection failure to the
+    Director would raise ClientConnectorError/ServerTimeoutError before
+    ever reaching that check, both already covered above.
+    Included anyway, based on real evidence: in the 2026-08-04 run, three
+    datasets (15, 14, 13) failed with BadDirectorResponse within ~30ms of
+    dataset 17's hard ClientConnectorError connection refusal to a
+    different host — too tightly clustered to be coincidence, and
+    consistent with a brief window of broader federation instability
+    (a director backend returning a degraded/error response, not
+    necessarily the exact same host or fault as dataset 17's). A malformed
+    one-off response during that kind of transient instability is exactly
+    the shape of thing retrying resolves; reusing the existing reset+retry
+    path (rather than a special longer backoff) is a deliberate, modest
+    choice — nothing in the evidence points to needing a different backoff
+    than the other connection-class cases already use, and this can be
+    revisited from real retry-outcome data once it's live.
     """
     return isinstance(exc, _CONNECTION_ERROR_TYPES)
 

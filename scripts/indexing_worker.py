@@ -106,10 +106,48 @@ SBATCH_SCRIPT = Path(__file__).resolve().parent / "indexing_worker.sbatch"
 #     matching how the real degradation compounded across datasets 3 and 4
 #     in the same process, not within either one alone.
 PROACTIVE_RESET_CALLS = 2000
-# Backoff before the one reactive retry, giving a transient DNS/connect
-# issue a moment to clear after the reset — same magnitude as
-# IDLE_POLL_SECONDS below, not a value with its own special significance.
-RETRY_BACKOFF_SECONDS = 5
+
+# Retry-loop tuning (2026-08-04, extending the original single-retry
+# design): real production evidence showed a genuine network blip
+# (dataset_id=17's `OSError: Connect call failed`) outlast the one retry
+# the original design allowed. Two separate, deliberately different-depth
+# schedules — see list_path()'s _retry_connection_class/_retry_unclassified
+# for how each is used:
+#
+# CONNECTION_RETRY_BACKOFFS: for exceptions _is_connection_error recognizes
+# (timeout, NoConnectionError, CancelledError/aiohappyeyeballs,
+# ClientConnectorError/OSError, BadDirectorResponse) — well-understood as
+# usually-transient, so these get the full loop. ~3x multiplier per step
+# (5s, 15s, 45s), capped well under the "not exceeding a minute or two"
+# guidance — worst case this adds ~65s to one dataset's walk (3 retries,
+# 4 attempts total) before falling through to mark_failed. That's a real,
+# bounded delay to the sequential queue behind it (this worker is
+# deliberately single-threaded — see _index_dataset's own docstring on the
+# mentor directive against concurrent listing calls), not an open-ended
+# one; not tuned from a precisely-timed data point (the real blip's exact
+# duration isn't in the log), but a reasoned middle ground between "long
+# enough to plausibly ride out a real several-tens-of-seconds hiccup" and
+# "short enough that a genuinely down origin doesn't stall the queue for
+# many minutes." A starting point, same spirit as PROACTIVE_RESET_CALLS —
+# adjustable from real retry-outcome data once this is live.
+CONNECTION_RETRY_BACKOFFS = [5, 15, 45]
+
+# UNCLASSIFIED_RETRY_ATTEMPTS/_BACKOFF_SECONDS: for anything
+# _is_connection_error doesn't recognize — a genuinely new exception type,
+# or an anomaly (e.g. the 2026-08-04 investigation's openalex case, which
+# turned out not to be an encoding bug and remains unexplained) that
+# doesn't fit a known connection-class pattern. Deliberately a much
+# smaller, more conservative allowance than the connection-class loop
+# above — 1 retry, not 3 — on the theory that most real-world failures are
+# probably transient even when the exact cause isn't cleanly classified,
+# without fully abandoning the caution that made these zero-retry in the
+# original design. A flat (not exponential) backoff is enough for a single
+# retry; no filesystem reset here (unlike the connection-class path) since
+# resetting is specifically a connection-pressure mitigation, and an
+# unclassified exception isn't confirmed to be session/connection-related
+# at all — resetting on faith could mask what's actually going on.
+UNCLASSIFIED_RETRY_ATTEMPTS = 1
+UNCLASSIFIED_RETRY_BACKOFF_SECONDS = 10
 
 # Running count of .ls() calls made on the *current* filesystem instance,
 # since it was last (re)created — module-level and reset to 0 by either
@@ -196,58 +234,152 @@ def _index_dataset(entry: dict) -> int:
         ).fetchone()
         return row[0] if row else None
 
-    def list_path(path: str) -> list:
-        """The one place this walk calls fs.ls() — wraps it with the
-        connection-pressure safeguards (see the module-level comment above
-        PROACTIVE_RESET_CALLS). Reassigns the enclosing fs (nonlocal) on a
-        reset so every subsequent call in this walk — including the retry
-        below — actually gets the benefit of the fresh instance, not the
-        stale one that just got dropped.
+    def _reraise_cancelled_as_exception(exc: BaseException) -> None:
+        # CancelledError is a BaseException, not an Exception — main()'s
+        # except Exception (and this task's own spec: fall through to
+        # mark_failed once retries are exhausted) needs a real Exception to
+        # catch, or a CancelledError surviving to the end of a retry loop
+        # would crash the whole worker process instead of just failing this
+        # one dataset. Re-raised as a plain RuntimeError carrying the same
+        # message so mark_failed still gets something meaningful to report.
+        if isinstance(exc, asyncio.CancelledError):
+            raise RuntimeError(f"{type(exc).__name__}: {exc}") from exc
+        raise exc
 
-        Catches BaseException, not Exception: asyncio.CancelledError (seen
-        directly in the real failure logs) isn't an Exception subclass, so
-        an `except Exception` here would silently let it skip the
-        connection-class check entirely. Anything _is_connection_error
-        doesn't recognize (a real 404, an auth requirement, a genuine
-        KeyboardInterrupt/SystemExit) is re-raised immediately, unchanged
-        from today's behavior — this only ever intercepts the specific
-        connection-class types listed in api/routes/pelican.py.
+    def _retry_connection_class(path: str, encoded: str, first_exc: BaseException) -> list:
+        """The full retry loop for exceptions _is_connection_error
+        recognizes — see CONNECTION_RETRY_BACKOFFS' module-level comment
+        for the reasoning behind the schedule. Resets the filesystem
+        singleton before every attempt (existing behavior, kept) since
+        these are specifically session/connection-pressure failures a
+        fresh instance plausibly helps with.
         """
         nonlocal fs
         global _ls_call_count
-
-        try:
-            # _encode_path_segment: see its docstring in api/routes/pelican.py
-            # for the confirmed root cause this works around (aiowebdav2
-            # silently unescaping every .ls() path before it reaches the
-            # wire) — path itself stays the raw, human-readable string
-            # everywhere else in this walk (staged_size, buffer, logging);
-            # only the actual fs.ls() call gets the encoded copy.
-            result = fs.ls(_encode_path_segment(path))
-        except BaseException as e:
-            if not _is_connection_error(e):
-                raise
+        exc = first_exc
+        for attempt, backoff in enumerate(CONNECTION_RETRY_BACKOFFS, start=1):
             logger.warning(
-                "Reactive filesystem reset for dataset_id=%s: %s after %d calls on this instance"
-                " — resetting and retrying %r once",
-                dataset_id, type(e).__name__, _ls_call_count, path,
+                "Connection-class retry %d/%d for dataset_id=%s: %s (%d calls on this instance)"
+                " — resetting, waiting %ds, then retrying %r",
+                attempt, len(CONNECTION_RETRY_BACKOFFS), dataset_id, type(exc).__name__,
+                _ls_call_count, backoff, path,
             )
             reset_default_filesystem()
             _ls_call_count = 0
             fs = _resolve_filesystem(entry["path"])
-            time.sleep(RETRY_BACKOFF_SECONDS)
+            time.sleep(backoff)
             try:
-                result = fs.ls(_encode_path_segment(path))  # a second failure here propagates — no second retry
-            except asyncio.CancelledError as e2:
-                # CancelledError is a BaseException, not an Exception —
-                # main()'s except Exception (and this task's own spec: fall
-                # through to mark_failed if the retry also fails) needs a
-                # real Exception to catch, or a second connection-class
-                # failure here would crash the whole worker process instead
-                # of just failing this one dataset. Re-raised as a plain
-                # RuntimeError carrying the same message so mark_failed
-                # still gets something meaningful to report.
-                raise RuntimeError(f"{type(e2).__name__}: {e2}") from e2
+                return fs.ls(encoded)
+            except BaseException as e:
+                if not _is_connection_error(e):
+                    # The retry surfaced a *different kind* of failure —
+                    # most plausibly the reset+wait cleared whatever was
+                    # transient and this is the dataset's real,
+                    # non-connection problem (e.g. a genuine 404 that was
+                    # masked by the original connection error). Stop
+                    # spending more retries/origin requests on the
+                    # connection-class schedule; deliberately doesn't hand
+                    # this off to the unclassified path's own small
+                    # allowance either — a failure that changed shape
+                    # mid-retry is exactly the kind of surprising case
+                    # worth stopping on and reporting plainly, not
+                    # guessing at further.
+                    logger.warning(
+                        "Connection-class retry for dataset_id=%s surfaced a different"
+                        " exception type (%s) — stopping retries, reporting it directly",
+                        dataset_id, type(e).__name__,
+                    )
+                    raise
+                exc = e
+        logger.error(
+            "Connection-class retries exhausted for dataset_id=%s after %d attempt(s): %s",
+            dataset_id, len(CONNECTION_RETRY_BACKOFFS) + 1, type(exc).__name__,
+        )
+        _reraise_cancelled_as_exception(exc)
+
+    def _retry_unclassified(path: str, encoded: str, first_exc: BaseException) -> list:
+        """Small, separate safety net for exceptions _is_connection_error
+        doesn't recognize — see UNCLASSIFIED_RETRY_ATTEMPTS' module-level
+        comment for why this is deliberately shallower than the
+        connection-class loop above (fewer attempts, flat backoff, no
+        filesystem reset).
+        """
+        exc = first_exc
+        for attempt in range(1, UNCLASSIFIED_RETRY_ATTEMPTS + 1):
+            logger.warning(
+                "Unclassified-exception retry %d/%d for dataset_id=%s: %s"
+                " — waiting %ds, then retrying %r",
+                attempt, UNCLASSIFIED_RETRY_ATTEMPTS, dataset_id, type(exc).__name__,
+                UNCLASSIFIED_RETRY_BACKOFF_SECONDS, path,
+            )
+            time.sleep(UNCLASSIFIED_RETRY_BACKOFF_SECONDS)
+            try:
+                return fs.ls(encoded)
+            except BaseException as e:
+                exc = e
+        logger.error(
+            "Unclassified-exception retries exhausted for dataset_id=%s after %d attempt(s): %s",
+            dataset_id, UNCLASSIFIED_RETRY_ATTEMPTS + 1, type(exc).__name__,
+        )
+        _reraise_cancelled_as_exception(exc)
+
+    def list_path(path: str) -> list:
+        """The one place this walk calls fs.ls() — dispatches a failure into
+        exactly one of three buckets:
+          - connection-class (_is_connection_error): the full retry loop.
+          - confirmed data-class (classify_failure's auth_required/
+            not_found/permission — a genuine, well-understood non-connection
+            failure, e.g. a real RemoteResourceNotFoundError): zero retries,
+            propagates immediately, unchanged from before this retry-loop
+            work. Reuses classify_failure rather than a fresh check here so
+            this stays in sync with the same categories the admin
+            panel/downloads/Quick Access already treat as "confirmed,
+            don't-retry" shapes of failure — no separate classification
+            scheme to keep in sync by hand.
+          - genuinely unclassified (classify_failure's "unknown" catch-all):
+            the small safety-net retry.
+        Getting this dispatch right matters: an earlier version of this
+        change routed *everything* that wasn't connection-class into the
+        unclassified retry, including confirmed 404s — caught during
+        verification (a simulated RemoteResourceNotFoundError was getting a
+        pointless extra origin request and a 10s wait before still failing,
+        exactly the "don't retry confirmed-missing data" rule this task
+        explicitly requires staying zero-retry).
+
+        The proactive-reset check below is a clean post-step, applied once
+        a result is finally in hand regardless of whether it took 1 attempt
+        or several retries to get there — this is deliberate: retries
+        never increment _ls_call_count themselves (each connection-class
+        retry already resets it to 0 via reset_default_filesystem), so
+        there's no special-casing needed for a proactive threshold being
+        crossed mid-retry-sequence; the counter and the check both only
+        ever see "how many successful calls has the *current* instance
+        served," exactly as before this change.
+        """
+        nonlocal fs
+        global _ls_call_count
+
+        # _encode_path_segment: see its docstring in api/routes/pelican.py
+        # for the confirmed root cause this works around (aiowebdav2
+        # silently unescaping every .ls() path before it reaches the
+        # wire) — path itself stays the raw, human-readable string
+        # everywhere else in this walk (staged_size, buffer, logging);
+        # only the actual fs.ls() call gets the encoded copy.
+        encoded = _encode_path_segment(path)
+        try:
+            result = fs.ls(encoded)
+        except BaseException as e:
+            if _is_connection_error(e):
+                result = _retry_connection_class(path, encoded, e)
+            elif classify_failure(e).code != "unknown":
+                # Confirmed data-class (auth_required/not_found/permission)
+                # — a reset+retry can't fix genuinely missing data or a
+                # missing token, and retrying would just be an unnecessary
+                # extra request against the origin, contrary to the mentor
+                # directive against casual repeated listing calls.
+                raise
+            else:
+                result = _retry_unclassified(path, encoded, e)
 
         _ls_call_count += 1
         if _ls_call_count >= PROACTIVE_RESET_CALLS:
