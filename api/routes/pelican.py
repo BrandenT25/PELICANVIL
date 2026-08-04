@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from pelicanfs import OSDFFileSystem
 from pelicanfs.exceptions import NoCredentialsException
-from aiowebdav2.exceptions import UnauthorizedError, AccessDeniedError
+from aiowebdav2.exceptions import UnauthorizedError, AccessDeniedError, NoConnectionError, ConnectionExceptionError
 import aiohttp
+import asyncio
 import fsspec, os, json, shutil, logging, sqlite3
 from pathlib import Path
 from collections import defaultdict
@@ -32,6 +33,89 @@ def _resolve_filesystem(namespace: str) -> OSDFFileSystem:
     if token:
         return OSDFFileSystem(direct_reads=False, headers={"Authorization": f"Bearer {token}"})
     return osdf
+
+
+def reset_default_filesystem() -> None:
+    """Drops the shared module-level `osdf` singleton and replaces it with a
+    fresh OSDFFileSystem, so the next _resolve_filesystem() call for any
+    unauthenticated namespace gets a brand-new instance — and, transitively,
+    whatever internal aiohttp session/connector/DNS-resolver state pelicanfs
+    holds on the old one is dropped instead of carried forward.
+
+    Written for scripts/indexing_worker.py's connection-pressure safeguards
+    (see its PROACTIVE_RESET_CALLS / list_path) — a single-process, 24h+
+    Slurm job making tens of thousands of sequential .ls() calls is the one
+    caller shape actually exposed to the degrade-over-time failure found by
+    the 2026-08-04 investigation (a brand-new aiohttp.ClientSession gets
+    created per .ls() call inside pelicanfs's own get_webdav_client, never
+    reused — third-party behavior, not something pelican-ui's call site can
+    change without touching pelicanfs source, which is out of scope). The
+    per-user PUN web process wasn't found to be meaningfully exposed to the
+    same failure (see that investigation's Phase 5 conclusion — a request
+    makes at most a handful of calls, nowhere near the volume needed, and
+    Passenger's own process recycling is already a coarser version of the
+    same mitigation) so nothing here is wired into pelicanlistPath or
+    download_one_file; this function just lives here, next to osdf itself,
+    since resetting it is squarely pelican.py's own responsibility.
+
+    Safe to call at any time — it only affects *future* _resolve_filesystem()
+    calls. A caller that already holds a reference to the old instance (e.g.
+    mid-request) keeps using it uninterrupted; nothing here reaches into or
+    cancels an in-flight call.
+    """
+    global osdf
+    osdf = OSDFFileSystem(direct_reads=False)
+
+
+# Genuine network/session failures — as opposed to a data-class exception
+# like RemoteResourceNotFoundError, where the origin is reachable and
+# correctly reporting the path doesn't exist. See _is_connection_error's
+# own docstring for why each of these is included.
+_CONNECTION_ERROR_TYPES = (
+    NoConnectionError,
+    ConnectionExceptionError,
+    aiohttp.ClientConnectionError,
+    TimeoutError,
+    asyncio.CancelledError,
+)
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """True if exc represents a genuine connection/session-level failure —
+    the kind scripts/indexing_worker.py's reactive safeguard should reset
+    the filesystem singleton and retry for — rather than a data-class
+    failure (a real 404, an auth requirement, a genuine server error
+    response) that a reset can't fix and shouldn't delay handling.
+
+    NoConnectionError: aiowebdav2's own wrapper around aiohttp's
+    ClientConnectionError, raised by execute_request() when the underlying
+    .request() call itself fails (see aiowebdav2/client.py) — covers
+    ClientConnectorError, ServerTimeoutError, ConnectionTimeoutError,
+    ServerDisconnectedError, etc. by inheritance, so catching the aiohttp
+    base class below is partly redundant with this, but .ls() calls go
+    through aiowebdav2, which re-wraps these before pelican-ui's code ever
+    sees them — keeping both covers whichever layer a given pelicanfs call
+    path happens to surface the exception from.
+    ConnectionExceptionError: aiowebdav2's wrapper around an unexpected
+    aiohttp.ClientResponseError raised directly from the request call
+    itself (not a normal status-code response) — same network-failure
+    shape as NoConnectionError, just a different aiowebdav2 wrapper.
+    aiohttp.ClientConnectionError: the direct aiohttp exception, for any
+    call path that isn't routed through aiowebdav2's wrapping (e.g. if a
+    future call site uses .get()/download instead of .ls()).
+    TimeoutError: covers both Python's builtin TimeoutError (which
+    asyncio.TimeoutError is an alias for since 3.11, and which fsspec's own
+    FSTimeoutError subclasses) and aiohttp's ServerTimeoutError/
+    ConnectionTimeoutError (both already covered above via
+    ClientConnectionError, included again here for the case where a
+    timeout surfaces as a bare TimeoutError instead).
+    asyncio.CancelledError: seen directly in the real failure logs' later,
+    near-instant failures (aiohappyeyeballs' DNS/connect racing hitting
+    CancelledError) — a BaseException, not an Exception, so it needs its
+    own explicit inclusion; a caller checking this function needs to catch
+    BaseException, not just Exception, to ever see one to classify.
+    """
+    return isinstance(exc, _CONNECTION_ERROR_TYPES)
 
 
 def _is_auth_required(exc: Exception) -> bool:

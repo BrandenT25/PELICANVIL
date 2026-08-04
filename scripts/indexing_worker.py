@@ -18,6 +18,7 @@ the #SBATCH resource header) starts the first cycle. This script assumes
 it's already running inside an allocated job — it never calls sbatch for
 its OWN first invocation, only to queue the next cycle.
 """
+import asyncio
 import logging
 import subprocess
 import sys
@@ -42,8 +43,10 @@ from api.core.indexing_queue import (
 # that found .ls() raises aiowebdav2's UnauthorizedError/AccessDeniedError,
 # not aiohttp's, and fixed _is_auth_required to match. Any future fix to
 # that logic (e.g. a similar gap found for a different pelicanfs code path)
-# lands in one place and this worker gets it for free.
-from api.routes.pelican import _resolve_filesystem, _is_auth_required
+# lands in one place and this worker gets it for free. reset_default_filesystem
+# and _is_connection_error are the connection-pressure safeguards from the
+# 2026-08-04 investigation — see list_path() below for how they're used.
+from api.routes.pelican import _resolve_filesystem, _is_auth_required, reset_default_filesystem, _is_connection_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("pelican-ui.indexing-worker")
@@ -63,6 +66,48 @@ WALLTIME_HOURS = 24
 RENEWAL_MARGIN_MINUTES = 60
 
 SBATCH_SCRIPT = Path(__file__).resolve().parent / "indexing_worker.sbatch"
+
+# Connection-pressure safeguards (2026-08-04 investigation): pelicanfs's own
+# _ls_real creates a brand-new aiohttp.ClientSession per .ls() call and
+# never reuses one across calls — third-party behavior this worker can't
+# change without touching pelicanfs source (out of scope, see that
+# investigation's report). Sustained over tens of thousands of calls in one
+# continuous multi-hour process, this is consistent with the observed
+# "healthy for hours, then a wall" pattern (TCP TIME_WAIT / ephemeral-port /
+# file-descriptor pressure building until new connections can't be
+# established). Two safeguards mitigate this entirely from pelican-ui's own
+# code, without touching pelicanfs/aiowebdav2 — see list_path() in
+# _index_dataset for where both are applied:
+#   - proactive (PROACTIVE_RESET_CALLS): drop and recreate the shared
+#     filesystem singleton every N .ls() calls, well before pressure has a
+#     chance to build toward the failure point. The real failure log's
+#     first healthy dataset made it 40,200 calls over 3+ hours before any
+#     sign of trouble, and the *next* dataset — starting from a process
+#     that already carried that accumulated pressure — failed after only
+#     ~29 minutes, nowhere near that count on its own. That gap between
+#     "still fine at 40,200" and "already struggling well before that on a
+#     pressured process" is exactly why this threshold is deliberately an
+#     order of magnitude under the first number, not tuned tight against
+#     it — the real safe ceiling isn't known, and an unnecessary reset is
+#     nearly free (recreating one filesystem object), while resetting too
+#     late risks hitting the wall anyway. This is a starting point meant to
+#     be adjusted from the real log data Phase 4's logging below produces,
+#     not a final tuned value. Counts cumulatively across dataset
+#     boundaries within one continuous worker process, not per-dataset —
+#     matching how the real degradation compounded across datasets 3 and 4
+#     in the same process, not within either one alone.
+PROACTIVE_RESET_CALLS = 2000
+# Backoff before the one reactive retry, giving a transient DNS/connect
+# issue a moment to clear after the reset — same magnitude as
+# IDLE_POLL_SECONDS below, not a value with its own special significance.
+RETRY_BACKOFF_SECONDS = 5
+
+# Running count of .ls() calls made on the *current* filesystem instance,
+# since it was last (re)created — module-level and reset to 0 by either
+# safeguard firing, not scoped to a single dataset's walk (see
+# PROACTIVE_RESET_CALLS' comment on why this has to span dataset
+# boundaries).
+_ls_call_count = 0
 
 
 _STAGING_BATCH_SIZE = 200
@@ -142,6 +187,65 @@ def _index_dataset(entry: dict) -> int:
         ).fetchone()
         return row[0] if row else None
 
+    def list_path(path: str) -> list:
+        """The one place this walk calls fs.ls() — wraps it with the
+        connection-pressure safeguards (see the module-level comment above
+        PROACTIVE_RESET_CALLS). Reassigns the enclosing fs (nonlocal) on a
+        reset so every subsequent call in this walk — including the retry
+        below — actually gets the benefit of the fresh instance, not the
+        stale one that just got dropped.
+
+        Catches BaseException, not Exception: asyncio.CancelledError (seen
+        directly in the real failure logs) isn't an Exception subclass, so
+        an `except Exception` here would silently let it skip the
+        connection-class check entirely. Anything _is_connection_error
+        doesn't recognize (a real 404, an auth requirement, a genuine
+        KeyboardInterrupt/SystemExit) is re-raised immediately, unchanged
+        from today's behavior — this only ever intercepts the specific
+        connection-class types listed in api/routes/pelican.py.
+        """
+        nonlocal fs
+        global _ls_call_count
+
+        try:
+            result = fs.ls(path)
+        except BaseException as e:
+            if not _is_connection_error(e):
+                raise
+            logger.warning(
+                "Reactive filesystem reset for dataset_id=%s: %s after %d calls on this instance"
+                " — resetting and retrying %r once",
+                dataset_id, type(e).__name__, _ls_call_count, path,
+            )
+            reset_default_filesystem()
+            _ls_call_count = 0
+            fs = _resolve_filesystem(entry["path"])
+            time.sleep(RETRY_BACKOFF_SECONDS)
+            try:
+                result = fs.ls(path)  # a second failure here propagates — no second retry
+            except asyncio.CancelledError as e2:
+                # CancelledError is a BaseException, not an Exception —
+                # main()'s except Exception (and this task's own spec: fall
+                # through to mark_failed if the retry also fails) needs a
+                # real Exception to catch, or a second connection-class
+                # failure here would crash the whole worker process instead
+                # of just failing this one dataset. Re-raised as a plain
+                # RuntimeError carrying the same message so mark_failed
+                # still gets something meaningful to report.
+                raise RuntimeError(f"{type(e2).__name__}: {e2}") from e2
+
+        _ls_call_count += 1
+        if _ls_call_count >= PROACTIVE_RESET_CALLS:
+            logger.info(
+                "Proactive filesystem reset for dataset_id=%s after %d .ls() calls (threshold=%d)",
+                dataset_id, _ls_call_count, PROACTIVE_RESET_CALLS,
+            )
+            reset_default_filesystem()
+            _ls_call_count = 0
+            fs = _resolve_filesystem(entry["path"])
+
+        return result
+
     def walk(path: str) -> int:
         nonlocal folders_visited
         cached = staged_size(path)
@@ -151,7 +255,7 @@ def _index_dataset(entry: dict) -> int:
             return cached
 
         total = 0
-        for item in fs.ls(path):
+        for item in list_path(path):
             if item["type"] == "directory":
                 total += walk(item["name"])
             else:
