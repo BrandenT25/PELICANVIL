@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <script>(function(){try{if(localStorage.getItem("pelican-ui-theme")==="light"){document.documentElement.setAttribute("data-theme","light");}}catch(e){}})();</script>
-    <title>Documentation | Pelican-UI</title>
+    <title>Documentation | PELICANVIL</title>
     {% if BLIND_MODE %}
     <link rel="icon" type="image/svg+xml" href="{{ROOT_URL}}/api/static/img/blind-mode-favicon.svg">
     {% else %}
@@ -32,7 +32,7 @@
           <li><a class="docs-sidebar-link" href="#getting-started">Getting Started</a></li>
           <li class="docs-sidebar-group">
             <div class="docs-sidebar-group-header">
-              <a class="docs-sidebar-link" href="#using-pelican-ui">Using pelican-ui</a>
+              <a class="docs-sidebar-link" href="#using-pelican-ui">Using PELICANVIL</a>
               <button class="docs-sidebar-chevron" aria-label="Toggle section"></button>
             </div>
             <ul class="docs-sidebar-sublist">
@@ -51,31 +51,31 @@
       </nav>
 
       <main class="docs-content">
-        <h1>pelican-ui Documentation</h1>
+        <h1>PELICANVIL Documentation</h1>
 
         <h2 id="getting-started">Getting Started</h2>
 
-        <h3 id="what-is-pelican-ui">What is pelican-ui?</h3>
+        <h3 id="what-is-pelican-ui">What is PELICANVIL?</h3>
         {% if BLIND_MODE %}
-        <p>pelican-ui is a web app I built for browsing, streaming, and downloading datasets available through the Pelican/OSDF federated data platform, specifically for use on an HPC cluster. It came out of a research finding that OSDF currently has no central, public dataset catalog. This tool fills that gap by indexing a growing set of known, publicly accessible datasets, and it gives you a file browser, ready-made code snippets, and direct downloads to your cluster storage. You don't need to know a dataset's exact namespace path ahead of time.</p>
+        <p>PELICANVIL is a web app I built for browsing, streaming, and downloading datasets available through the Pelican/OSDF federated data platform, specifically for use on an HPC cluster. It came out of a research finding that OSDF currently has no central, public dataset catalog. This tool fills that gap by indexing a growing set of known, publicly accessible datasets, and it gives you a file browser, ready-made code snippets, and direct downloads to your cluster storage. You don't need to know a dataset's exact namespace path ahead of time.</p>
         {% else %}
-        <p>pelican-ui is a web app I built for browsing, streaming, and downloading datasets available through the Pelican/OSDF federated data platform, specifically for use on Purdue's Anvil HPC cluster. It came out of a research finding that OSDF currently has no central, public dataset catalog. This tool fills that gap by indexing a growing set of known, publicly accessible datasets, and it gives you a file browser, ready-made code snippets, and direct downloads to your Anvil storage. You don't need to know a dataset's exact namespace path ahead of time.</p>
+        <p>PELICANVIL is a web app I built for browsing, streaming, and downloading datasets available through the Pelican/OSDF federated data platform, specifically for use on Purdue's Anvil HPC cluster. It came out of a research finding that OSDF currently has no central, public dataset catalog. This tool fills that gap by indexing a growing set of known, publicly accessible datasets, and it gives you a file browser, ready-made code snippets, and direct downloads to your Anvil storage. You don't need to know a dataset's exact namespace path ahead of time.</p>
         {% endif %}
 
         <h3 id="what-is-pelican">What are Pelican and OSDF?</h3>
         <p>The Open Science Data Federation (OSDF) is a distributed data delivery network that lets you access datasets hosted at institutions across the country without staging files to local storage first. <a class="docs-inline-link" href="https://pelicanplatform.org/" target="_blank" rel="noopener">Pelican</a> is the platform that powers it. It provides both a command-line client and a Python library (<a class="docs-inline-link" href="https://github.com/PelicanPlatform/pelicanfs" target="_blank" rel="noopener">pelicanfs</a>) that plugs into standard scientific computing tools like xarray, pandas, and PyTorch. If you've used Globus or similar research data transfer tools before, the basic idea is similar: data stays where it lives, and you pull only what you actually need, when you need it. See the <a class="docs-inline-link" href="https://docs.pelicanplatform.org/about-pelican" target="_blank" rel="noopener">official Pelican usage docs</a> for the full reference.</p>
 
-        <h2 id="using-pelican-ui">Using pelican-ui</h2>
+        <h2 id="using-pelican-ui">Using PELICANVIL</h2>
 
         <h3 id="browsing-datasets">Browsing datasets on the Explore Datasets page</h3>
-        <p>The Explore Datasets page shows every dataset currently indexed by pelican-ui, organized by research category. Click a dataset card to expand it. This loads a file browser showing the dataset's actual directory structure straight from OSDF, along with a snippets panel for generating ready-to-use code. The expanded card also shows the file format, streaming availability, and access level for that dataset.</p>
+        <p>The Explore Datasets page shows every dataset currently indexed by PELICANVIL, organized by research category. Click a dataset card to expand it. This loads a file browser showing the dataset's actual directory structure straight from OSDF, along with a snippets panel for generating ready-to-use code. The expanded card also shows the file format, streaming availability, and access level for that dataset.</p>
         <figure class="docs-figure">
           <img src="{{ROOT_URL}}/api/static/img/pelican-ui-datasets-example.png" alt="The Explore Datasets page with an expanded dataset card showing the file browser and snippets panel">
           <figcaption>The Explore Datasets page with an expanded dataset card</figcaption>
         </figure>
 
         <h3 id="quick-access">Using Quick Access to load an arbitrary path</h3>
-        <p>If you already know the OSDF/Pelican path to a dataset that isn't in the indexed catalog yet, use Quick Access instead of Explore Datasets. Paste in a path and hit Load. pelican-ui validates it against OSDF and gives you the same file browser and snippets experience as an indexed dataset, without it needing to be added to the catalog first.</p>
+        <p>If you already know the OSDF/Pelican path to a dataset that isn't in the indexed catalog yet, use Quick Access instead of Explore Datasets. Paste in a path and hit Load. PELICANVIL validates it against OSDF and gives you the same file browser and snippets experience as an indexed dataset, without it needing to be added to the catalog first.</p>
         <div class="docs-callout docs-callout-tip">
           <span class="docs-callout-label">Tip</span>
           <div class="docs-callout-body">Not sure if a path is valid? Quick Access only does a single directory listing to check, not a deep crawl, so it's a fast way to sanity-check a namespace path before writing any code against it.</div>
@@ -160,13 +160,13 @@ class OSDFDataset(Dataset):
 
         <h3 id="downloading-files">Downloading files to Home / Project / Scratch</h3>
         {% if BLIND_MODE %}
-        <p>Once you've selected files or folders in the file browser, hit Select Folder to choose a destination on your cluster storage (Home, Project, or Scratch). pelican-ui browses your actual cluster directories, so you can navigate to wherever you want the files to land and then hit Download.</p>
+        <p>Once you've selected files or folders in the file browser, hit Select Folder to choose a destination on your cluster storage (Home, Project, or Scratch). PELICANVIL browses your actual cluster directories, so you can navigate to wherever you want the files to land and then hit Download.</p>
         {% else %}
-        <p>Once you've selected files or folders in the file browser, hit Select Folder to choose a destination on Anvil (Home, Project, or Scratch). pelican-ui browses your actual Anvil directories, so you can navigate to wherever you want the files to land and then hit Download.</p>
+        <p>Once you've selected files or folders in the file browser, hit Select Folder to choose a destination on Anvil (Home, Project, or Scratch). PELICANVIL browses your actual Anvil directories, so you can navigate to wherever you want the files to land and then hit Download.</p>
         {% endif %}
         <div class="docs-callout docs-callout-warn">
           <span class="docs-callout-label">Warn</span>
-          <div class="docs-callout-body">Downloads run one file at a time in the background and don't block the page. pelican-ui doesn't show live per-file progress, but once everything has been attempted you'll get a summary in the download panel (and a toast) showing how many succeeded or failed, plus a link to open the destination folder in OOD's file browser. Give it a minute for large files or many selections before that summary appears.</div>
+          <div class="docs-callout-body">Downloads run one file at a time in the background and don't block the page. PELICANVIL doesn't show live per-file progress, but once everything has been attempted you'll get a summary in the download panel (and a toast) showing how many succeeded or failed, plus a link to open the destination folder in OOD's file browser. Give it a minute for large files or many selections before that summary appears.</div>
         </div>
 
         <h3 id="troubleshooting">Troubleshooting</h3>
@@ -179,9 +179,9 @@ class OSDFDataset(Dataset):
 
         <h4>A snippet fails with an import error</h4>
         {% if BLIND_MODE %}
-        <p>The snippets assume pelicanfs (and xarray/pandas/torch, depending on which snippet you used) are already installed in your active environment. pelican-ui doesn't install anything for you. Make sure you've activated a virtual environment and installed pelicanfs with pip install pelicanfs before running any of these.</p>
+        <p>The snippets assume pelicanfs (and xarray/pandas/torch, depending on which snippet you used) are already installed in your active environment. PELICANVIL doesn't install anything for you. Make sure you've activated a virtual environment and installed pelicanfs with pip install pelicanfs before running any of these.</p>
         {% else %}
-        <p>The snippets assume pelicanfs (and xarray/pandas/torch, depending on which snippet you used) are already installed in your active environment. pelican-ui doesn't install anything for you. If you're on Anvil, make sure you've activated a virtual environment and installed pelicanfs with pip install pelicanfs before running any of these.</p>
+        <p>The snippets assume pelicanfs (and xarray/pandas/torch, depending on which snippet you used) are already installed in your active environment. PELICANVIL doesn't install anything for you. If you're on Anvil, make sure you've activated a virtual environment and installed pelicanfs with pip install pelicanfs before running any of these.</p>
         {% endif %}
 
         <h2 id="about-pelican-osdf">About Pelican / OSDF</h2>
@@ -189,7 +189,7 @@ class OSDFDataset(Dataset):
 
         <div class="docs-callout docs-callout-note">
           <span class="docs-callout-label">Note</span>
-          <div class="docs-callout-body">One thing worth knowing up front: OSDF doesn't have a central, public dataset catalog. Datasets are hosted independently by different institutions, and finding one usually means already knowing its namespace path, whether from a collaborator, from documentation, or from pelican-ui's own indexed catalog. This is actually the main research finding this project grew out of.</div>
+          <div class="docs-callout-body">One thing worth knowing up front: OSDF doesn't have a central, public dataset catalog. Datasets are hosted independently by different institutions, and finding one usually means already knowing its namespace path, whether from a collaborator, from documentation, or from PELICANVIL's own indexed catalog. This is actually the main research finding this project grew out of.</div>
         </div>
 
         <div class="docs-callout docs-callout-note">
@@ -198,7 +198,7 @@ class OSDFDataset(Dataset):
         </div>
 
         <h2 id="dataset-catalog">Dataset Catalog</h2>
-        <p>Every dataset pelican-ui indexes, pulled live from the same database that powers the Explore Datasets page. Sort by clicking a column header, or filter by name below.</p>
+        <p>Every dataset PELICANVIL indexes, pulled live from the same database that powers the Explore Datasets page. Sort by clicking a column header, or filter by name below.</p>
         <p class="docs-catalog-overview">Loading catalog…</p>
         <div class="docs-catalog-controls">
           <input type="text" class="docs-catalog-search-input" placeholder="Filter datasets by name">
@@ -218,7 +218,7 @@ class OSDFDataset(Dataset):
 
         <h2 id="research-findings">Research Findings</h2>
         <p>This project's benchmarking compared Pelican/OSDF against GPFS and S3-backed storage across three tests: cache/time-to-first-byte behavior under concurrent load, download-first vs. streaming access patterns, and real ML training I/O (ResNet-50 on ImageNet). Streaming consistently outperformed downloading for partial-read workloads, and a warm OSDF cache came close to local storage performance. A cold cache was meaningfully slower, though, which matters for real workflow planning.</p>
-        <p>The more original finding wasn't really about performance, though. It was that OSDF's biggest practical barrier right now is discoverability, not speed. There's no central catalog, and even once you find a dataset, whether it's actually streamable depends on how it happens to be packaged. pelican-ui exists as a direct, applied response to that gap.</p>
+        <p>The more original finding wasn't really about performance, though. It was that OSDF's biggest practical barrier right now is discoverability, not speed. There's no central catalog, and even once you find a dataset, whether it's actually streamable depends on how it happens to be packaged. PELICANVIL exists as a direct, applied response to that gap.</p>
       </main>
 
     </div>
