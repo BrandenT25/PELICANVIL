@@ -58,6 +58,14 @@ function computeDownloadProgress(files) {
   const total = files.length || 1;
   const doneCount = files.filter((f) => f.status === "succeeded" || f.status === "failed").length;
   const allSizesKnown = files.length > 0 && files.every((f) => typeof f.size === "number");
+  // Files are downloaded strictly one at a time, in order (see
+  // api/routes/downloads.py's _run_download_job) — everything before the
+  // first non-terminal ("pending" or "retrying") entry has already
+  // resolved, so that entry is exactly the one currently in flight. No
+  // separate "current file" field from the server needed; this is
+  // derivable from the same files array already being polled.
+  const current = files.find((f) => f.status === "pending" || f.status === "retrying");
+  const currentSuffix = current ? ` — downloading ${baseName(current.path)}` : "";
 
   if (allSizesKnown) {
     const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
@@ -66,11 +74,11 @@ function computeDownloadProgress(files) {
       if (f.status === "succeeded" || f.status === "failed") doneBytes += f.size;
     });
     const percent = totalBytes > 0 ? Math.min(100, Math.round((doneBytes / totalBytes) * 100)) : 0;
-    return { percent, label: `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)} · ${percent}%` };
+    return { percent, label: `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)} · ${percent}%${currentSuffix}` };
   }
 
   const percent = Math.round((doneCount / total) * 100);
-  return { percent, label: `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)` };
+  return { percent, label: `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)${currentSuffix}` };
 }
 
 function renderProgressBar(files) {
@@ -106,22 +114,51 @@ function baseName(path) {
   return path.split("/").filter(Boolean).pop() || path;
 }
 
-function renderFileList(files) {
+/**
+ * @param {Array<{path: string, status: string, error?: string}>} files
+ * @param {number} [recordId] - the download_history id this file list
+ *   belongs to, needed to wire up the per-file restart button below.
+ *   Omitted (or the caller not wiring up click handling) just means no
+ *   restart buttons render — used for contexts that don't have an id handy.
+ */
+function renderFileList(files, recordId) {
   if (!files || files.length === 0) return "";
   const rows = files
     .map((file) => {
-      const icon = file.status === "succeeded" ? "fa-check" : file.status === "failed" ? "fa-times" : "fa-circle-o";
+      // "retrying" (2026-08-04 per-file restart work) is a real fourth
+      // state, distinct from "pending" (never attempted) — same spinner
+      // treatment as the persistent download toast's in-progress icon, so
+      // a file actively being retried reads the same way across surfaces.
+      const icon =
+        file.status === "succeeded" ? "fa-check" :
+        file.status === "retrying" ? "fa-spinner fa-spin" :
+        file.status === "failed" ? "fa-times" :
+        "fa-circle-o";
+      // Classified reason (see api/core/failure_classification.py), shown
+      // inline rather than title-only — a hover-only tooltip is exactly the
+      // "easy to miss" gap this same work fixed on the admin panel's
+      // indexing badge; don't repeat it here.
+      const errorLine = file.status === "failed" && file.error
+        ? `<span class="downloads-entry-file-error-text">${escapeHtml(file.error)}</span>`
+        : "";
+      const restartBtn = file.status === "failed" && recordId != null
+        ? `<button class="downloads-entry-file-restart" data-path="${escapeHtml(file.path)}" title="Retry this file" aria-label="Retry this file"><i class="fa fa-refresh"></i></button>`
+        : "";
       return `
         <li class="downloads-entry-file downloads-entry-file-${file.status}" title="${escapeHtml(file.path)}">
           <i class="fa ${icon}"></i>
-          <span>${escapeHtml(baseName(file.path))}</span>
+          <div class="downloads-entry-file-info">
+            <span class="downloads-entry-file-name">${escapeHtml(baseName(file.path))}</span>
+            ${errorLine}
+          </div>
+          ${restartBtn}
         </li>`;
     })
     .join("");
   return /* html */ `
     <details class="downloads-entry-files">
       <summary class="downloads-entry-files-summary">Show files (${files.length})</summary>
-      <ul class="downloads-entry-files-list">${rows}</ul>
+      <ul class="downloads-entry-files-list" data-record-id="${recordId != null ? recordId : ""}">${rows}</ul>
     </details>
   `;
 }
@@ -173,6 +210,34 @@ async function restartDownloadRecord(id) {
   }
 }
 
+/**
+ * POSTs to restart one specific failed file within a download record —
+ * added 2026-08-04 alongside the per-file restart control in
+ * renderFileList, same normalize-the-result shape as restartDownloadRecord.
+ * @returns {Promise<{ok: boolean, error?: string}>}
+ */
+async function restartDownloadFile(id, path) {
+  try {
+    const response = await fetch(`${window.ROOT_PATH}/downloads/history/${id}/restart-file`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    if (!response.ok) {
+      let detail = `HTTP error! status ${response.status}`;
+      try {
+        const body = await response.json();
+        if (body && body.detail) detail = body.detail;
+      } catch (_) {}
+      return { ok: false, error: detail };
+    }
+    return { ok: true };
+  } catch (error) {
+    console.log("restarting download file failed", error);
+    return { ok: false, error: "Couldn't reach the server. Try again." };
+  }
+}
+
 function renderEntry(entry) {
   const card = document.createElement("div");
   card.className = "downloads-entry";
@@ -206,7 +271,7 @@ function renderEntry(entry) {
     </div>
     ${entry.status === "in_progress" ? `<div class="downloads-entry-progress-slot">${renderProgressBar(entry.files)}</div>` : ""}
     ${entry.error_message ? `<div class="downloads-entry-error"><i class="fa fa-exclamation-circle"></i> ${escapeHtml(entry.error_message)}</div>` : ""}
-    <div class="downloads-entry-files-slot">${renderFileList(entry.files)}</div>
+    <div class="downloads-entry-files-slot">${renderFileList(entry.files, entry.id)}</div>
     ${showOodLink ? `<a class="downloads-entry-ood-link" href="${buildOodUrl(entry.destination)}" target="_blank" rel="noopener noreferrer"><i class="fa fa-external-link"></i> Open in File Browser</a>` : ""}
   `;
 
@@ -232,6 +297,33 @@ function renderEntry(entry) {
       loadDownloadHistory();
     });
   }
+
+  // One delegated listener for every per-file restart button in this card's
+  // file list, rather than one listener per button — renderFileList's
+  // markup is rebuilt wholesale on every poll tick while a restart is in
+  // flight (see startCardPolling below), so per-button listeners would need
+  // re-attaching on every one of those rebuilds; delegating to the
+  // never-replaced .downloads-entry-files-slot avoids that entirely.
+  const filesSlot = card.querySelector(".downloads-entry-files-slot");
+  filesSlot.addEventListener("click", async (event) => {
+    const btn = event.target.closest(".downloads-entry-file-restart");
+    if (!btn) return;
+    const list = btn.closest(".downloads-entry-files-list");
+    const recordId = list && list.dataset.recordId;
+    if (!recordId) return;
+    btn.disabled = true;
+    const result = await restartDownloadFile(recordId, btn.dataset.path);
+    if (!result.ok) {
+      showToast(result.error || "Couldn't restart this file. Try again.", "error");
+      btn.disabled = false;
+      return;
+    }
+    showToast("File restarted.", "success");
+    // Same reasoning as the whole-record restart handler above: reload
+    // rather than hand-patch, since a restart changes item_count,
+    // started_at, files, and the job_id backing polling all at once.
+    loadDownloadHistory();
+  });
 
   const deleteBtn = card.querySelector(".downloads-entry-delete");
   deleteBtn.addEventListener("click", async () => {
@@ -330,7 +422,7 @@ function startCardPolling(card, jobId) {
         // preserve whether the user had the disclosure open across the swap —
         // otherwise it'd yank itself shut every 2s while being watched
         const wasOpen = slot.querySelector("details")?.open ?? false;
-        slot.innerHTML = renderFileList(job.files);
+        slot.innerHTML = renderFileList(job.files, job.history_id);
         const details = slot.querySelector("details");
         if (details && wasOpen) details.open = true;
       }

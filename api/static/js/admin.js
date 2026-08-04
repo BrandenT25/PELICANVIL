@@ -42,6 +42,7 @@ async function displayDataset(toggle){
                     <span class="datasetName">${dataset["name"]}</span>
                     <span class="datasetDescription">${dataset["path"]}</span>
                     <span class="index-status-badge"></span>
+                    <span class="index-status-reason"></span>
                 </div>
                 <div class="modify-wrapper">
                     <i class="fa fa-refresh" id="reindex-btn" title="Re-index dataset size"></i>
@@ -817,9 +818,28 @@ async function triggerReindex(datasetId){
  * @param {HTMLElement} datasetCard
  * @param {number} datasetId
  */
+// "still running" and "stuck" used to be visually indistinguishable — this
+// just formats the gap between the queue entry's own started_at (already
+// returned by GET /admin/datasets/{id}/index-status, see
+// api/core/indexing_queue.py's get_queue_status) and now. Minutes/hours
+// only, not seconds — this is meant to answer "has this been running for a
+// suspiciously long time," not to be a stopwatch.
+function formatElapsed(startedAtIso){
+    if (!startedAtIso) return ""
+    const startedMs = new Date(startedAtIso).getTime()
+    if (Number.isNaN(startedMs)) return ""
+    const elapsedMin = Math.max(0, Math.round((Date.now() - startedMs) / 60000))
+    if (elapsedMin < 1) return "just started"
+    if (elapsedMin < 60) return `${elapsedMin}m elapsed`
+    const hours = Math.floor(elapsedMin / 60)
+    const minutes = elapsedMin % 60
+    return `${hours}h ${minutes}m elapsed`
+}
+
 function renderIndexBadge(datasetCard, status){
     const badge = datasetCard.querySelector(".index-status-badge")
     if (!badge) return
+    const reason = datasetCard.querySelector(".index-status-reason")
     // The worker (scripts/indexing_worker.py) discovers folder structure by
     // walking it — there's no total folder count known upfront, only a
     // running count of how many have been visited so far (folders_done,
@@ -827,12 +847,24 @@ function renderIndexBadge(datasetCard, status){
     // shows real progress ("340 folders scanned") rather than a fabricated
     // "340/812" or percentage — an honest count, not invented precision.
     if (status.status === "in_progress" && typeof status.folders_done === "number") {
-        badge.textContent = `${INDEX_STATUS_LABELS.in_progress} ${status.folders_done} folder${status.folders_done === 1 ? "" : "s"} scanned`
+        const elapsed = formatElapsed(status.started_at)
+        badge.textContent = `${INDEX_STATUS_LABELS.in_progress} ${status.folders_done} folder${status.folders_done === 1 ? "" : "s"} scanned${elapsed ? ` · ${elapsed}` : ""}`
     } else {
         badge.textContent = INDEX_STATUS_LABELS[status.status] || status.status
     }
     badge.className = `index-status-badge index-status-badge-${status.status}`
     badge.title = status.status === "failed" && status.error_message ? status.error_message : ""
+    // Visible, not hover-only — a native title tooltip was the whole gap
+    // this was added to fix (2026-08-04): the real reason was already
+    // there, just invisible until a user thought to hover. Mirrors the
+    // Downloads page's same-purpose inline error text
+    // (.downloads-entry-file-error-text in downloads.js/downloads.css).
+    if (reason) {
+        reason.textContent = status.status === "failed" && status.error_message
+            ? status.error_message
+            : ""
+        reason.style.display = reason.textContent ? "" : "none"
+    }
 }
 
 function stopIndexPolling(datasetCard){

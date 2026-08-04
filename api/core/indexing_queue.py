@@ -136,7 +136,7 @@ def update_progress(dataset_id: int, folders_done: int) -> None:
     _with_state(mutator)
 
 
-def _finish_current(dataset_id: int, status: str, error_message: str | None, folders_done: int | None) -> None:
+def _finish_current(dataset_id: int, status: str, error_message: str | None, folders_done: int | None, error_category: str | None = None) -> None:
     def mutator(state):
         current = state["current"]
         if current is None or current["dataset_id"] != dataset_id:
@@ -144,6 +144,7 @@ def _finish_current(dataset_id: int, status: str, error_message: str | None, fol
         current["status"] = status
         current["finished_at"] = datetime.now(timezone.utc).isoformat()
         current["error_message"] = error_message
+        current["error_category"] = error_category
         if folders_done is not None:
             current["folders_done"] = folders_done
         state["history"].insert(0, current)
@@ -158,8 +159,13 @@ def mark_complete(dataset_id: int, folders_done: int) -> None:
     _finish_current(dataset_id, "complete", None, folders_done)
 
 
-def mark_failed(dataset_id: int, error_message: str, folders_done: int | None = None) -> None:
-    _finish_current(dataset_id, "failed", error_message, folders_done)
+def mark_failed(dataset_id: int, error_message: str, folders_done: int | None = None, error_category: str | None = None) -> None:
+    # error_category is the FailureCategory.code from api/core/
+    # failure_classification.py's classify_failure (2026-08-04) — lets the
+    # admin panel show a consistent, classified reason next to "Index
+    # failed" the same way the Downloads page does for failed files,
+    # instead of a raw exception string with no machine-readable shape.
+    _finish_current(dataset_id, "failed", error_message, folders_done, error_category)
 
 
 def recover_interrupted() -> None:
@@ -190,6 +196,7 @@ def recover_interrupted() -> None:
             current["error_message"] = (
                 "Worker restarted before this job finished; treat as failed and re-queue if still needed."
             )
+            current["error_category"] = "worker_restarted"
             state["history"].insert(0, current)
             state["history"] = state["history"][:_MAX_HISTORY]
             state["current"] = None
@@ -222,6 +229,7 @@ def get_queue_status(dataset_id: int) -> dict:
                 "status": entry["status"],
                 "finished_at": entry.get("finished_at"),
                 "error_message": entry.get("error_message"),
+                "error_category": entry.get("error_category"),
                 "folders_done": entry.get("folders_done"),
             }
 

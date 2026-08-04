@@ -287,11 +287,29 @@ a {
   font-size: 0.78rem;
   color: var(--text-secondary);
 }
-.downloads-entry-file span {
+/* Name + (for a failed file) its classified reason, stacked — replaces the
+   single bare <span> the row used to be a direct flex child of, so the
+   error line can wrap onto its own line under the name instead of fighting
+   the name for the same single-line ellipsis truncation. */
+.downloads-entry-file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.downloads-entry-file-name {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+.downloads-entry-file-error-text {
+  color: var(--error);
+  font-size: 0.72rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .downloads-entry-file .fa {
   flex-shrink: 0;
@@ -305,6 +323,34 @@ a {
 }
 .downloads-entry-file-pending .fa {
   color: var(--text-muted);
+}
+/* Same amber "in progress" convention as toast.css's .toast-inprogress —
+   a file actively being retried should read the same way the persistent
+   download toast already does. */
+.downloads-entry-file-retrying .fa {
+  color: var(--warning);
+}
+.downloads-entry-file-restart {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: color 0.15s ease, background-color 0.15s ease;
+}
+.downloads-entry-file-restart:hover {
+  color: var(--accent-text);
+  background-color: rgba(var(--accent-rgb), 0.12);
+}
+.downloads-entry-file-restart:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .downloads-entry-ood-link {

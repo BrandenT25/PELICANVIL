@@ -1,14 +1,11 @@
 from fastapi import APIRouter, HTTPException
 from pelicanfs import OSDFFileSystem
-from pelicanfs.exceptions import NoCredentialsException
-from aiowebdav2.exceptions import UnauthorizedError, AccessDeniedError, NoConnectionError, ConnectionExceptionError
-import aiohttp
-import asyncio
 import fsspec, os, json, shutil, logging, sqlite3
 from pathlib import Path
 from collections import defaultdict
 from api.core.config import DB_PATH
 from api.core.pelican_auth import get_token_for_namespace, log_unexpected_pelican_error
+from api.core.failure_classification import _is_auth_required, classify_failure
 osdf = OSDFFileSystem(direct_reads=False)
 
 logger = logging.getLogger("pelican-ui.pelican")
@@ -67,80 +64,6 @@ def reset_default_filesystem() -> None:
     osdf = OSDFFileSystem(direct_reads=False)
 
 
-# Genuine network/session failures — as opposed to a data-class exception
-# like RemoteResourceNotFoundError, where the origin is reachable and
-# correctly reporting the path doesn't exist. See _is_connection_error's
-# own docstring for why each of these is included.
-_CONNECTION_ERROR_TYPES = (
-    NoConnectionError,
-    ConnectionExceptionError,
-    aiohttp.ClientConnectionError,
-    TimeoutError,
-    asyncio.CancelledError,
-)
-
-
-def _is_connection_error(exc: BaseException) -> bool:
-    """True if exc represents a genuine connection/session-level failure —
-    the kind scripts/indexing_worker.py's reactive safeguard should reset
-    the filesystem singleton and retry for — rather than a data-class
-    failure (a real 404, an auth requirement, a genuine server error
-    response) that a reset can't fix and shouldn't delay handling.
-
-    NoConnectionError: aiowebdav2's own wrapper around aiohttp's
-    ClientConnectionError, raised by execute_request() when the underlying
-    .request() call itself fails (see aiowebdav2/client.py) — covers
-    ClientConnectorError, ServerTimeoutError, ConnectionTimeoutError,
-    ServerDisconnectedError, etc. by inheritance, so catching the aiohttp
-    base class below is partly redundant with this, but .ls() calls go
-    through aiowebdav2, which re-wraps these before pelican-ui's code ever
-    sees them — keeping both covers whichever layer a given pelicanfs call
-    path happens to surface the exception from.
-    ConnectionExceptionError: aiowebdav2's wrapper around an unexpected
-    aiohttp.ClientResponseError raised directly from the request call
-    itself (not a normal status-code response) — same network-failure
-    shape as NoConnectionError, just a different aiowebdav2 wrapper.
-    aiohttp.ClientConnectionError: the direct aiohttp exception, for any
-    call path that isn't routed through aiowebdav2's wrapping (e.g. if a
-    future call site uses .get()/download instead of .ls()).
-    TimeoutError: covers both Python's builtin TimeoutError (which
-    asyncio.TimeoutError is an alias for since 3.11, and which fsspec's own
-    FSTimeoutError subclasses) and aiohttp's ServerTimeoutError/
-    ConnectionTimeoutError (both already covered above via
-    ClientConnectionError, included again here for the case where a
-    timeout surfaces as a bare TimeoutError instead).
-    asyncio.CancelledError: seen directly in the real failure logs' later,
-    near-instant failures (aiohappyeyeballs' DNS/connect racing hitting
-    CancelledError) — a BaseException, not an Exception, so it needs its
-    own explicit inclusion; a caller checking this function needs to catch
-    BaseException, not just Exception, to ever see one to classify.
-    """
-    return isinstance(exc, _CONNECTION_ERROR_TYPES)
-
-
-def _is_auth_required(exc: Exception) -> bool:
-    """True if exc means "this namespace needs a token" rather than some
-    other failure (network issue, genuine 404/500, etc).
-
-    pelicanfs doesn't use one HTTP layer consistently, so this has to cover
-    both: `.get()` (download_one_file) goes through fsspec's HTTPFileSystem,
-    a real aiohttp.ClientResponseError from raise_for_status(). `.ls()`
-    (pelicanlistPath) goes through a *different* library entirely —
-    aiowebdav2's WebDAV client — which maps 401/403 to its own
-    UnauthorizedError/AccessDeniedError (see aiowebdav2/client.py's request
-    method), never touching aiohttp.ClientResponseError at all. Confirmed by
-    reading both installed packages' source, not assumed from docs — see
-    2026-08-01 investigation notes. NoCredentialsException covers the third
-    case: pelicanfs's own token-generation step finding no credential at all
-    before any HTTP request goes out.
-    """
-    if isinstance(exc, NoCredentialsException):
-        return True
-    if isinstance(exc, (UnauthorizedError, AccessDeniedError)):
-        return True
-    return isinstance(exc, aiohttp.ClientResponseError) and exc.status in (401, 403)
-
-
 def _attach_folder_sizes(entries: list) -> list:
     """Annotates each directory entry in a .ls() result with real_size (an
     int, from the indexing worker's dataset_folder_sizes table) when known,
@@ -188,7 +111,19 @@ class DownloadError(Exception):
     """Raised by download_one_file instead of HTTPException. This is called
     from background job threads (api/routes/downloads.py), not just request
     handlers, and HTTPException only makes sense when there's an active
-    request to attach a status code to."""
+    request to attach a status code to.
+
+    category carries the FailureCategory.code classify_failure produced
+    (see below) — api/routes/downloads.py's _run_download_job stores this
+    alongside the message on each failed file, so the frontend gets a
+    stable machine-readable reason too, not just prose to display verbatim.
+    Defaults to "unknown" for DownloadAuthRequiredError, which doesn't go
+    through classify_failure (it's already unambiguous by construction).
+    """
+
+    def __init__(self, message: str, category: str = "unknown"):
+        self.category = category
+        super().__init__(message)
 
 
 class DownloadAuthRequiredError(DownloadError):
@@ -200,7 +135,7 @@ class DownloadAuthRequiredError(DownloadError):
 
     def __init__(self, namespace: str):
         self.namespace = namespace
-        super().__init__(f'"{namespace}" requires an access token.')
+        super().__init__(f'"{namespace}" requires an access token.', "auth_required")
 
 
 def download_one_file(filepath: str, storage_location: str) -> None:
@@ -218,16 +153,19 @@ def download_one_file(filepath: str, storage_location: str) -> None:
     fs = _resolve_filesystem(path)
     try:
         fs.get(path, storage_location, recursive=True)
-    except FileNotFoundError:
-        raise DownloadError(f'"{filepath}" was not found on the federation.') from None
-    except PermissionError:
-        raise DownloadError(f"You don't have permission to write to {storage_location}.") from None
     except Exception as e:
         if _is_auth_required(e):
             raise DownloadAuthRequiredError(path) from None
-        logger.exception("download_one_file failed for %s -> %s", filepath, storage_location)
-        log_unexpected_pelican_error(path, e)
-        raise DownloadError("Download failed. Check server logs.") from e
+        category = classify_failure(e)
+        if category.code == "unknown":
+            # Only the genuinely unclassified case gets logged loudly and
+            # written to last_error.log — auth/not_found/permission/
+            # connection are all already-understood, expected shapes of
+            # failure with an honest message of their own; logging those as
+            # if they were surprising would just be noise.
+            logger.exception("download_one_file failed for %s -> %s", filepath, storage_location)
+            log_unexpected_pelican_error(path, e)
+        raise DownloadError(category.message, category.code) from (e if category.code == "unknown" else None)
 
 
 @pelicanRouter.get("/datasets/category/list-path")

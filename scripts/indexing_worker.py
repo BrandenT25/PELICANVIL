@@ -38,15 +38,21 @@ from api.core.indexing_queue import (
     recover_interrupted,
     update_progress,
 )
-# Reusing pelican.py's own filesystem-resolution and auth-failure detection
-# rather than re-implementing it here — see the 2026-08-01 investigation
-# that found .ls() raises aiowebdav2's UnauthorizedError/AccessDeniedError,
-# not aiohttp's, and fixed _is_auth_required to match. Any future fix to
-# that logic (e.g. a similar gap found for a different pelicanfs code path)
-# lands in one place and this worker gets it for free. reset_default_filesystem
-# and _is_connection_error are the connection-pressure safeguards from the
-# 2026-08-04 investigation — see list_path() below for how they're used.
-from api.routes.pelican import _resolve_filesystem, _is_auth_required, reset_default_filesystem, _is_connection_error
+# Reusing pelican.py's own filesystem-resolution rather than re-implementing
+# it here. reset_default_filesystem is the connection-pressure safeguard
+# from the 2026-08-04 investigation — see list_path() below for how it's
+# used.
+from api.routes.pelican import _resolve_filesystem, reset_default_filesystem
+# _is_auth_required/_is_connection_error moved here from pelican.py in the
+# 2026-08-04 failure-visibility work, alongside the new classify_failure
+# that wraps both — see api/core/failure_classification.py's own docstring
+# for why. log_unexpected_pelican_error is the same ~/.pelican-ui/last_error.log
+# diagnostic api/routes/pelican.py's web-request handlers already write to;
+# extending it to this worker's failure path (see main()) gives Branden the
+# same no-Anvil-shell-access-needed diagnostic surface for indexing failures
+# that already existed for web-request failures.
+from api.core.failure_classification import _is_auth_required, _is_connection_error, classify_failure
+from api.core.pelican_auth import log_unexpected_pelican_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("pelican-ui.indexing-worker")
@@ -354,9 +360,25 @@ def main() -> None:
             logger.info("Completed dataset_id=%s (%d folders)", entry["dataset_id"], folders_visited)
         except Exception as e:
             if _is_auth_required(e):
+                error_category = "auth_required"
                 message = f'"{entry["path"]}" requires an access token and none is stored for it.'
             else:
-                message = str(e) or type(e).__name__
+                # classify_failure instead of the old bare str(e)/type(e).__name__
+                # fallback — same honest-categories reasoning as
+                # api/routes/pelican.py's download_one_file, so the admin
+                # panel gets a consistent, classified reason instead of a
+                # raw exception string that happened to differ in shape
+                # from what the downloads/Quick Access surfaces show.
+                category = classify_failure(e)
+                error_category = category.code
+                message = category.message
+                if category.code == "unknown":
+                    # Same "only log the genuinely surprising case" split as
+                    # download_one_file — gives Branden the same
+                    # no-Anvil-shell-access-needed diagnostic surface for
+                    # indexing failures that already existed for web-request
+                    # failures via this same log file.
+                    log_unexpected_pelican_error(entry["path"], e)
             logger.exception("Indexing failed for dataset_id=%s", entry["dataset_id"])
             # Nothing is lost on a mid-walk crash: every folder finished so
             # far was already streamed to dataset_folder_sizes_staging (see
@@ -374,7 +396,7 @@ def main() -> None:
                     "Partial progress preserved for dataset_id=%s: %d folders staged",
                     entry["dataset_id"], partial_count,
                 )
-            mark_failed(entry["dataset_id"], message, folders_done=partial_count or None)
+            mark_failed(entry["dataset_id"], message, folders_done=partial_count or None, error_category=error_category)
             # No re-raise: a failed job must not take the worker process down
             # with it — the loop goes back to idling and stays able to pick
             # up the next queued entry, per Phase 1's failure-handling spec.

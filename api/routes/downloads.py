@@ -162,36 +162,86 @@ def _update_job(job_id: str, status: str | None = None, files: list[dict] | None
         con.close()
 
 
-def _files_with_sizes(paths: list[str], sizes: dict[str, int] | None) -> list[dict]:
+def _files_with_sizes(paths: list[str], sizes: dict[str, int] | None, initial_status: str = "pending") -> list[dict]:
     """Shared by _enqueue_job's initial DB row and _run_download_job's own
     working copy — both build a fresh files list from `paths` independently
     (the background thread doesn't read back what _enqueue_job wrote), so
     both need to attach `size` the same way or the field would silently
-    disappear the first time _run_download_job's own list overwrites it."""
+    disappear the first time _run_download_job's own list overwrites it.
+
+    initial_status defaults to "pending" (never attempted yet) for a fresh
+    download. Restart callers pass "retrying" instead — a status distinct
+    from both "pending" (never touched) and the eventual terminal
+    "succeeded"/"failed", so a file actively being retried is visually
+    distinguishable in the UI from one that simply hasn't started yet (the
+    per-file restart work added 2026-08-04)."""
     result = []
     for p in paths:
-        entry = {"path": p, "status": "pending"}
+        entry = {"path": p, "status": initial_status}
         if sizes and sizes.get(p) is not None:
             entry["size"] = sizes[p]
         result.append(entry)
     return result
 
 
-def _run_download_job(job_id: str, history_id: int, destination: str, paths: list[str], preserved_files: list[dict] | None = None, sizes: dict[str, int] | None = None) -> None:
+def _history_file_entry(f: dict) -> dict:
+    """path+status is all download_history.files has ever carried — kept
+    that way (no size) so a finished record stays small. The classified
+    .error/.error_category *are* added here for failed files (2026-08-04
+    failure-visibility work) — without them, the Downloads page would only
+    ever show a failure reason during live polling (download_jobs.files has
+    them) and lose it again the moment a finished job's terminal state gets
+    persisted into download_history and the page is reloaded."""
+    entry = {"path": f["path"], "status": "succeeded" if f["status"] == "succeeded" else "failed"}
+    if entry["status"] == "failed" and f.get("error"):
+        entry["error"] = f["error"]
+        entry["error_category"] = f.get("error_category", "unknown")
+    return entry
+
+
+def _run_download_job(job_id: str, history_id: int, destination: str, paths: list[str], preserved_files: list[dict] | None = None, sizes: dict[str, int] | None = None, is_restart: bool = False) -> None:
     # Runs on a background thread from _job_executor — this function is what
     # actually replaces the old request-held-open behavior. It reuses
     # download_one_file (api/routes/pelican.py) unchanged; only where it's
     # invoked from has changed.
     _update_job(job_id, status="in_progress")
 
-    files = _files_with_sizes(paths, sizes)
-    succeeded = []
-    failed = []
+    # files always reflects the *complete* set for this download — preserved
+    # entries from a prior attempt (see restartDownloadRecord/
+    # restartDownloadFile) come first, kept exactly as they already were
+    # (succeeded stays succeeded; for a per-file restart, any *other*
+    # still-failed file not being retried this round stays failed too, not
+    # silently cleared or retried), followed by this run's own files
+    # (retry_files, index-aligned with `paths` so the loop below can keep
+    # mutating them by position). Built as one list, up front, so every
+    # _update_job(job_id, files=files) call below — including the very
+    # first one, before any file has even started — already contains the
+    # preserved entries.
+    #
+    # This is the fix for the restart bug found 2026-08-04: download_jobs.files
+    # used to be built from `paths` (the retry subset) alone, so anything
+    # polling this job's live status mid-restart — and the Downloads page's
+    # terminal-state render, which reads straight from this same job status,
+    # not download_history — saw only the retried files; the previously-
+    # succeeded ones appeared to vanish until a manual page refresh finally
+    # read the *separately* correct download_history record.
+    # download_history's own merge was always correct; this was purely a
+    # download_jobs gap. preserved/retry_files are the same dict objects
+    # `files` holds (list concatenation copies references, not the dicts
+    # themselves), so mutating retry_files[i] below is mutating files too —
+    # no separate merge step needed at the end like the old code had.
+    preserved = list(preserved_files or [])
+    retry_files = _files_with_sizes(paths, sizes, initial_status="retrying" if is_restart else "pending")
+    files = preserved + retry_files
+    _update_job(job_id, files=files)
+
+    succeeded = [f["path"] for f in preserved if f.get("status") == "succeeded"]
+    failed = [f["path"] for f in preserved if f.get("status") == "failed"]
 
     for i, path in enumerate(paths):
         try:
             download_one_file(path, destination)
-            files[i]["status"] = "succeeded"
+            retry_files[i]["status"] = "succeeded"
             succeeded.append(path)
         except DownloadAuthRequiredError as e:
             # Flagged distinctly from a plain DownloadError so the frontend's
@@ -199,14 +249,16 @@ def _run_download_job(job_id: str, history_id: int, destination: str, paths: lis
             # tell "needs a token" apart from "actually broke" and pop the
             # same token modal browsing uses, instead of just reporting a
             # generic failure.
-            files[i]["status"] = "failed"
-            files[i]["error"] = str(e)
-            files[i]["auth_required"] = True
-            files[i]["namespace"] = e.namespace
+            retry_files[i]["status"] = "failed"
+            retry_files[i]["error"] = str(e)
+            retry_files[i]["error_category"] = e.category
+            retry_files[i]["auth_required"] = True
+            retry_files[i]["namespace"] = e.namespace
             failed.append(path)
         except DownloadError as e:
-            files[i]["status"] = "failed"
-            files[i]["error"] = str(e)
+            retry_files[i]["status"] = "failed"
+            retry_files[i]["error"] = str(e)
+            retry_files[i]["error_category"] = e.category
             failed.append(path)
         except Exception:
             # Belt-and-suspenders: download_one_file already wraps unexpected
@@ -215,49 +267,35 @@ def _run_download_job(job_id: str, history_id: int, destination: str, paths: lis
             # history row) stuck in "in_progress" forever with nothing to
             # report why — worse than recording a generic failure and moving on.
             logger.exception("Unexpected error downloading %s for job %s", path, job_id)
-            files[i]["status"] = "failed"
-            files[i]["error"] = "Unexpected error. Check server logs."
+            retry_files[i]["status"] = "failed"
+            retry_files[i]["error"] = "Unexpected error. Check server logs."
+            retry_files[i]["error_category"] = "unknown"
             failed.append(path)
         _update_job(job_id, files=files)
 
+    total_count = len(files)
     if not failed:
         final_status = "complete"
         error_message = None
     elif not succeeded:
         final_status = "failed"
-        error_message = f"{len(failed)} of {len(paths)} item(s) failed to download."
+        error_message = f"{len(failed)} of {total_count} item(s) failed to download."
     else:
         final_status = "partial"
-        error_message = f"{len(failed)} of {len(paths)} item(s) failed to download."
+        error_message = f"{len(failed)} of {total_count} item(s) failed to download."
 
     _update_job(job_id, status=final_status, files=files, error_message=error_message)
 
-    # preserved_files carries over files that already succeeded on a prior
-    # attempt when this job is retrying just the failed subset of a
-    # partial/failed download (see restartDownloadRecord) — merge them back
-    # in so the finished history record reflects the dataset's full file set
-    # rather than only whatever was retried this run. When this isn't a
-    # restart, preserved_files is empty, so combined_files/history_status end
-    # up identical to the this-run-only values above and single-shot
-    # downloads are unaffected.
-    combined_files = (preserved_files or []) + files
-    combined_failed_count = sum(1 for f in combined_files if f["status"] != "succeeded")
-    if combined_failed_count == 0:
-        history_status = "complete"
-        history_error_message = None
-    elif combined_failed_count == len(combined_files):
-        history_status = "failed"
-        history_error_message = f"{combined_failed_count} of {len(combined_files)} item(s) failed to download."
-    else:
-        history_status = "partial"
-        history_error_message = f"{combined_failed_count} of {len(combined_files)} item(s) failed to download."
-
-    history_files = [{"path": f["path"], "status": "succeeded" if f["status"] == "succeeded" else "failed"} for f in combined_files]
-    _finish_history_record(history_id, history_status, history_error_message, history_files)
+    # files already IS the full preserved+retry set (see above), so this no
+    # longer needs a separate combined_files merge the way the old code did
+    # — final_status/error_message above already reflect the whole picture
+    # since `succeeded` was seeded with the preserved paths from the start.
+    history_files = [_history_file_entry(f) for f in files]
+    _finish_history_record(history_id, final_status, error_message, history_files)
 
 
-def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str], preserved_files: list[dict] | None = None, sizes: dict[str, int] | None = None) -> str:
-    # Shared by startDownloadJob and restartDownloadRecord below — both boil
+def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str], preserved_files: list[dict] | None = None, sizes: dict[str, int] | None = None, is_restart: bool = False) -> str:
+    # Shared by startDownloadJob and both restart routes below — all boil
     # down to "create a download_jobs row and hand the actual transfer off to
     # a background thread", they just differ in how the history_id/paths they
     # pass in were obtained. Submitting to the pool just enqueues the call and
@@ -265,17 +303,25 @@ def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str],
     # worker thread picks it up, entirely off the request that called this.
     job_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
-    files = _files_with_sizes(paths, sizes)
+    # Includes preserved_files here too, kept exactly as they already were
+    # (see _run_download_job's own comment on why nothing forces their
+    # status), not just the retry subset in `paths` — otherwise there'd be
+    # a brief window between this insert and _run_download_job's own first
+    # _update_job call where the row already exists but still shows only
+    # the retried files, the same gap the 2026-08-04 restart-bug fix closed
+    # inside _run_download_job itself.
+    preserved = list(preserved_files or [])
+    files = preserved + _files_with_sizes(paths, sizes, initial_status="retrying" if is_restart else "pending")
     with _db_write_lock:
         con = _get_connection()
         cur = con.cursor()
         cur.execute(
             "INSERT INTO download_jobs (job_id, history_id, name, destination, status, item_count, files, started_at, updated_at) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
-            (job_id, history_id, name, destination, len(paths), json.dumps(files), now, now),
+            (job_id, history_id, name, destination, len(files), json.dumps(files), now, now),
         )
         con.commit()
         con.close()
-    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths, preserved_files, sizes)
+    _job_executor.submit(_run_download_job, job_id, history_id, destination, paths, preserved_files, sizes, is_restart)
     return job_id
 
 
@@ -290,24 +336,12 @@ async def startDownloadJob(payload: DownloadJobStart):
     return {"job_id": job_id, "history_id": history_id, "status": "pending"}
 
 
-@downloadsRouter.post("/downloads/history/{record_id}/restart")
-async def restartDownloadRecord(record_id: int):
-    # Retries only the files that actually failed last time, using the same
-    # name/destination the original download used — reuses _enqueue_job and
-    # _run_download_job unchanged, since the actual transfer logic doesn't
-    # need to know or care whether this is a first attempt or a retry.
-    # Works for both "failed" (every file failed) and "partial" (some
-    # succeeded, some failed) records; for partial, the already-succeeded
-    # files are carried through as preserved_files rather than re-downloaded
-    # or dropped from history — see the comment in _run_download_job.
-    #
-    # What's genuinely different from startDownloadJob, and why this isn't
-    # just a call to it: restarting is expected to update the *same* history
-    # entry in place (status flips failed/partial -> in_progress on the entry
-    # the user clicked Restart on), not create a second entry while the old
-    # one lingers. startDownloadJob always inserts a fresh history row, so it
-    # can't produce that in-place behavior — this endpoint resets the
-    # existing row instead of inserting a new one.
+class RestartFileRequest(BaseModel):
+    path: str
+
+
+def _get_restartable_record(record_id: int) -> sqlite3.Row:
+    """Shared fetch+validate for both restart routes below."""
     con = _get_connection()
     cur = con.cursor()
     cur.execute("SELECT * FROM download_history WHERE id = ?", (record_id,))
@@ -317,15 +351,35 @@ async def restartDownloadRecord(record_id: int):
         raise HTTPException(status_code=404, detail="Download record not found.")
     if row["status"] not in ("failed", "partial"):
         raise HTTPException(status_code=400, detail="Only failed or partially-failed downloads can be restarted.")
+    return row
 
-    all_files = json.loads(row["files"]) if row["files"] else []
-    retry_paths = [f["path"] for f in all_files if f.get("status") == "failed"]
-    preserved_files = [f for f in all_files if f.get("status") == "succeeded"]
-    if not retry_paths:
-        raise HTTPException(status_code=400, detail="No failed files recorded for this download.")
-    # Carry sizes forward from the original attempt's stored files — a
-    # restart has no frontend request body of its own to receive them from,
-    # they're only ever known at the point a download is first started.
+
+def _restart_files(record_id: int, row: sqlite3.Row, retry_paths: list[str], preserved_files: list[dict], all_files: list[dict]) -> str:
+    """Shared by restartDownloadRecord (retries every currently-failed file)
+    and restartDownloadFile (retries one specific file) — both reduce to
+    "reset this history record in place and re-enqueue retry_paths,
+    carrying preserved_files forward exactly as they already are." The two
+    callers differ only in which files end up in each bucket:
+    restartDownloadRecord retries every failed file and preserves the
+    succeeded ones; restartDownloadFile retries just the one requested path
+    and preserves everything else untouched — including any *other* still-
+    failed files, which must stay failed, not be silently retried or
+    cleared, since only one path was asked for (see _run_download_job's own
+    comment on why nothing here forces preserved entries to "succeeded").
+    sizes comes from all_files (the full original list, both callers have
+    it) rather than preserved_files alone, since preserved_files never
+    includes the retried path(s) and their sizes still need to survive the
+    restart the same way preserved files' do.
+
+    What's genuinely different from startDownloadJob, and why this isn't
+    just a call to it: restarting is expected to update the *same* history
+    entry in place (status flips failed/partial -> in_progress on the entry
+    the user clicked Restart on), not create a second entry while the old
+    one lingers. startDownloadJob always inserts a fresh history row, so it
+    can't produce that in-place behavior — resetting the existing row
+    instead of inserting a new one is what this helper does that
+    startDownloadJob's own path doesn't need to.
+    """
     sizes = {f["path"]: f["size"] for f in all_files if f.get("size") is not None}
 
     name = row["name"]
@@ -347,8 +401,40 @@ async def restartDownloadRecord(record_id: int):
         con.commit()
         con.close()
 
-    job_id = _enqueue_job(record_id, name, destination, retry_paths, preserved_files=preserved_files, sizes=sizes)
+    return _enqueue_job(record_id, name, destination, retry_paths, preserved_files=preserved_files, sizes=sizes, is_restart=True)
 
+
+@downloadsRouter.post("/downloads/history/{record_id}/restart")
+async def restartDownloadRecord(record_id: int):
+    # Retries every file that actually failed last time; already-succeeded
+    # files are carried through as preserved_files rather than re-downloaded
+    # or dropped from history — see _restart_files/_run_download_job.
+    row = _get_restartable_record(record_id)
+    all_files = json.loads(row["files"]) if row["files"] else []
+    retry_paths = [f["path"] for f in all_files if f.get("status") == "failed"]
+    preserved_files = [f for f in all_files if f.get("status") == "succeeded"]
+    if not retry_paths:
+        raise HTTPException(status_code=400, detail="No failed files recorded for this download.")
+
+    job_id = _restart_files(record_id, row, retry_paths, preserved_files, all_files)
+    return {"job_id": job_id, "history_id": record_id, "status": "in_progress"}
+
+
+@downloadsRouter.post("/downloads/history/{record_id}/restart-file")
+async def restartDownloadFile(record_id: int, payload: RestartFileRequest):
+    # Retries exactly one file — added 2026-08-04 alongside the "restarting"
+    # per-file status so a single flaky file doesn't require re-running
+    # every other already-failed file in the same batch just to retry it.
+    # Everything else in the record (succeeded *and* any other still-failed
+    # files) is preserved untouched — see _restart_files' own docstring.
+    row = _get_restartable_record(record_id)
+    all_files = json.loads(row["files"]) if row["files"] else []
+    target = next((f for f in all_files if f["path"] == payload.path), None)
+    if target is None or target.get("status") != "failed":
+        raise HTTPException(status_code=400, detail="That file isn't recorded as failed for this download.")
+
+    preserved_files = [f for f in all_files if f["path"] != payload.path]
+    job_id = _restart_files(record_id, row, [payload.path], preserved_files, all_files)
     return {"job_id": job_id, "history_id": record_id, "status": "in_progress"}
 
 

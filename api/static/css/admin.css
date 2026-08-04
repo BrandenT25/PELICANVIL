@@ -255,6 +255,21 @@
     background-color: rgba(var(--error-rgb), 0.14);
     cursor: help;
 }
+/* Visible failure reason next to the badge (2026-08-04) — the real message
+   already lived in the badge's title tooltip, but a hover-only native
+   tooltip is easy to miss entirely; this makes it readable by default,
+   same purpose as downloads.css's .downloads-entry-file-error-text. Hidden
+   (display:none, set in admin.js's renderIndexBadge) whenever there's
+   nothing to show, so it doesn't leave an empty gap for every other status. */
+.index-status-reason{
+    display: block;
+    width: fit-content;
+    max-width: 100%;
+    margin-top: 4px;
+    font-size: clamp(10px, 8px + 0.2vw, 12px);
+    color: var(--error);
+    overflow-wrap: anywhere;
+}
 
 #reindex-btn.disabled{
     opacity: 0.5;

@@ -876,6 +876,14 @@ function computeDownloadProgress(files) {
   const total = files.length || 1;
   const doneCount = files.filter((f) => f.status === "succeeded" || f.status === "failed").length;
   const allSizesKnown = files.length > 0 && files.every((f) => typeof f.size === "number");
+  // Files are downloaded strictly one at a time, in order (see
+  // api/routes/downloads.py's _run_download_job) — everything before the
+  // first non-terminal ("pending" or "retrying") entry has already
+  // resolved, so that entry is exactly the one currently in flight. No
+  // separate "current file" field from the server needed; this is
+  // derivable from the same files array already being polled.
+  const current = files.find((f) => f.status === "pending" || f.status === "retrying");
+  const currentSuffix = current ? ` — downloading ${current.path.split("/").filter(Boolean).pop() || current.path}` : "";
 
   if (allSizesKnown) {
     const totalBytes = files.reduce((sum, f) => sum + f.size, 0);
@@ -884,11 +892,11 @@ function computeDownloadProgress(files) {
       if (f.status === "succeeded" || f.status === "failed") doneBytes += f.size;
     });
     const percent = totalBytes > 0 ? Math.min(100, Math.round((doneBytes / totalBytes) * 100)) : 0;
-    return { percent, label: `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)} · ${percent}%` };
+    return { percent, label: `${formatBytes(doneBytes)} of ${formatBytes(totalBytes)} · ${percent}%${currentSuffix}` };
   }
 
   const percent = Math.round((doneCount / total) * 100);
-  return { percent, label: `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)` };
+  return { percent, label: `${doneCount} of ${total} item${total === 1 ? "" : "s"} (size unavailable for some items)${currentSuffix}` };
 }
 
 async function makeLocalDirectoryCards(root, path = "", browseLocalDirectoryContainer, mediumLabel, downloadLocationLabel){
@@ -1081,11 +1089,43 @@ async function resolveDownloadAuth(status, historyId, fullPath, oodUrl, isRetry 
   return buildDownloadResult(status, fullPath, oodUrl);
 }
 
+/**
+ * failed used to be just an array of paths — the server already attaches a
+ * classified .error/.error_category to each failed file (see
+ * api/routes/downloads.py's _run_download_job / api/core/failure_classification.py),
+ * but this function was discarding it before the toast ever saw it, which
+ * is why the toast's old copy was a hardcoded guess ("Check permissions...")
+ * regardless of the real cause. Kept here as {path, error, category} so
+ * finish() below can show the real reason (2026-08-04 failure-visibility work).
+ */
 function buildDownloadResult(status, fullPath, oodUrl) {
   const files = status.files || [];
   const succeeded = files.filter((f) => f.status === "succeeded").map((f) => f.path);
-  const failed = files.filter((f) => f.status !== "succeeded").map((f) => f.path);
+  const failed = files
+    .filter((f) => f.status !== "succeeded")
+    .map((f) => ({ path: f.path, error: f.error, category: f.error_category }));
   return { succeeded, failed, destination: fullPath, oodUrl };
+}
+
+/**
+ * A toast is one line — it can't reasonably enumerate N distinct reasons,
+ * so this only returns a specific reason when there's exactly one to show:
+ * a single failed file, or every failed file sharing the same classified
+ * cause. Anything else (genuinely mixed causes, or more than one file that
+ * fell into the "unknown" catch-all, which may not actually share a cause
+ * even though the category label matches) returns null, and the caller
+ * shows a generic count instead of guessing which reason to lead with.
+ * @param {Array<{path: string, error?: string, category?: string}>} failed
+ * @returns {string|null}
+ */
+function summarizeFailureReason(failed) {
+  if (failed.length === 0) return null;
+  if (failed.length === 1) return failed[0].error || null;
+  const categories = new Set(failed.map((f) => f.category || "unknown"));
+  if (categories.size === 1 && !categories.has("unknown")) {
+    return failed[0].error || null;
+  }
+  return null;
 }
 
 /**
@@ -1163,13 +1203,22 @@ function showProgressToast(sourceName) {
       toast.classList.remove("toast-success");
       toast.classList.add("toast-error");
       icon.className = "fa fa-exclamation-circle toast-icon";
-      messageEl.textContent = `"${sourceName}" failed — all ${result.failed.length} item${result.failed.length === 1 ? "" : "s"} failed. Check permissions on the destination and try again.`;
+      // Real classified reason (2026-08-04) replaces the old hardcoded
+      // "Check permissions on the destination and try again." guess, which
+      // was shown even when the actual cause wasn't permissions at all.
+      const reason = summarizeFailureReason(result.failed);
+      messageEl.textContent = reason
+        ? `"${sourceName}" failed — all ${result.failed.length} item${result.failed.length === 1 ? "" : "s"} failed: ${reason}`
+        : `"${sourceName}" failed — ${result.failed.length} item${result.failed.length === 1 ? "" : "s"} failed. See Downloads for details.`;
       label.textContent = `0 of ${total} succeeded`;
     } else {
       toast.classList.remove("toast-success");
       toast.classList.add("toast-error");
       icon.className = "fa fa-exclamation-circle toast-icon";
-      messageEl.textContent = `"${sourceName}" partially downloaded — ${result.failed.length} of ${total} item${total === 1 ? "" : "s"} failed.`;
+      const reason = summarizeFailureReason(result.failed);
+      messageEl.textContent = reason
+        ? `"${sourceName}" partially downloaded — ${result.failed.length} of ${total} item${total === 1 ? "" : "s"} failed: ${reason}`
+        : `"${sourceName}" partially downloaded — ${result.failed.length} of ${total} item${total === 1 ? "" : "s"} failed. See Downloads for details.`;
       label.textContent = `${result.succeeded.length} of ${total} succeeded`;
     }
 
