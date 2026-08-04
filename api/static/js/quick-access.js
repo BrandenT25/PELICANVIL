@@ -168,7 +168,14 @@ function buildQuickAccessTools(paths, path){
 }
 async function validateQuickAccessPath(path){
     try{
-        const response = await fetch(`${window.ROOT_PATH}/datasets/category/list-path?path=${path}`)
+        // encodeURIComponent: users type this path directly, making this
+        // fetch call the most likely place to see the widest variety of
+        // special characters — a raw '+'/'#'/'&'/'=' was silently
+        // corrupted here before ever reaching the backend (found 2026-08-04
+        // alongside the same-shaped aiowebdav2 bug fixed via
+        // api/routes/pelican.py's _encode_path_segment — separate, JS-side
+        // gap, this fetch call never encoded `path` at all).
+        const response = await fetch(`${window.ROOT_PATH}/datasets/category/list-path?path=${encodeURIComponent(path)}`)
             if(!response.ok) {
             if (response.status === 401){
                 const namespace = await extractAuthRequiredNamespace(response);
@@ -654,8 +661,10 @@ function download_file(container, download_paths, sourceName) {
 
 async function retrieveDirectoryPaths(path) {
   try {
+    // encodeURIComponent: see validateQuickAccessPath's comment above —
+    // same fix, same reason (2026-08-04).
     const response = await fetch(
-      `${window.ROOT_PATH}/datasets/category/list-path?path=${path}`,
+      `${window.ROOT_PATH}/datasets/category/list-path?path=${encodeURIComponent(path)}`,
     );
     if (!response.ok) {
       if (response.status === 401) {

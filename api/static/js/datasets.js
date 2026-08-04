@@ -637,8 +637,17 @@ async function makeFolderCards(path, container, download_card, breadcrumbs, isRe
  */
 async function retrieveDirectoryPaths(path) {
   try {
+    // encodeURIComponent: a raw path containing +/#/&/=/spaces/non-ASCII
+    // was silently corrupted here before it ever reached the backend — a
+    // literal '+' in a query string means a space per standard
+    // application/x-www-form-urlencoded rules, '&'/'=' get parsed as
+    // extra query params, '#' truncates the URL at the fragment. Found
+    // 2026-08-04 alongside the same-shaped aiowebdav2 bug in
+    // api/routes/pelican.py's _encode_path_segment — this is a separate,
+    // JS-side gap (this fetch call never used to encode `path` at all),
+    // not the same fix reused.
     const response = await fetch(
-      `${window.ROOT_PATH}/datasets/category/list-path?path=${path}`,
+      `${window.ROOT_PATH}/datasets/category/list-path?path=${encodeURIComponent(path)}`,
     );
     if (!response.ok) {
       if (response.status === 401) {

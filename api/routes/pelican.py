@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pelicanfs import OSDFFileSystem
 import fsspec, os, json, shutil, logging, sqlite3
 from pathlib import Path
+from urllib.parse import quote
 from collections import defaultdict
 from api.core.config import DB_PATH
 from api.core.pelican_auth import get_token_for_namespace, log_unexpected_pelican_error
@@ -62,6 +63,55 @@ def reset_default_filesystem() -> None:
     """
     global osdf
     osdf = OSDFFileSystem(direct_reads=False)
+
+
+def _encode_path_segment(path: str) -> str:
+    """Percent-encodes a path's special characters (space, +, #, %, &, =,
+    non-ASCII, etc.) while leaving '/' as a literal path separator —
+    defensive pre-encoding for every fs.ls()/fs.get() call, not a
+    general-purpose URL helper. Apply this right before the call, not
+    earlier — everything else in this app (DB storage, staging tables,
+    JSON responses, error messages, _resolve_filesystem's token lookup)
+    keeps using the raw, human-readable path unchanged.
+
+    Exists because of a real bug in aiowebdav2 (0.6.2), confirmed by
+    reading its source (aiowebdav2/urn.py): Urn.__init__ correctly
+    percent-encodes the path it's given (`self._path = quote(path)`), but
+    Client.get_url() then calls Urn.path(), which unconditionally
+    *unquotes* it again before building the actual request URL — the two
+    cancel out, so every .ls() call currently sends the raw, unescaped
+    path onto the wire regardless of what's passed in. Confirmed directly
+    against the installed library:
+        Urn('Measurement+1').path() == '/Measurement+1'   (unescaped!)
+    This is the root cause of the 2026-08-04 bug report (a folder named
+    "Measurement+1" 404ing while its "Measurement1" sibling worked) — the
+    origin most likely received (or misinterpreted) a literal/ambiguous
+    '+' instead of the folder's real name.
+
+    Also verified directly that pre-encoding survives that exact
+    round-trip intact — Urn's own quote()-then-unquote() only cancels ONE
+    level, so a value already percent-encoded once when it enters Urn
+    comes out the other side exactly as encoded:
+        Urn(quote('Measurement+1')).path() == '/Measurement%2B1'  (correct)
+    A path with no special characters is unaffected — quote()'s default
+    safe set already covers every character a normal path needs.
+
+    .get()/downloads don't go through aiowebdav2's Urn at all (a
+    different pelicanfs code path — get_origin_url/get_working_cache,
+    built with urllib.parse.urljoin, which never encodes OR decodes), so
+    a raw special character reaches the wire unencoded there too, just
+    via "never gets encoded in the first place" rather than a cancelling
+    round-trip. Same fix, same call-site shape, applied at every place
+    this app actually calls fs.ls()/fs.get(): here (download_one_file,
+    pelicanlistPath) and scripts/indexing_worker.py's own fs.ls() call,
+    which imports this function from here rather than duplicating it.
+
+    Deliberately does not touch pelicanfs/aiowebdav2 source, matching the
+    project's existing convention (see reset_default_filesystem above) —
+    this encodes defensively at the boundary, in pelican-ui's own code,
+    before a path ever reaches either library.
+    """
+    return quote(path, safe="/")
 
 
 def _attach_folder_sizes(entries: list) -> list:
@@ -152,7 +202,7 @@ def download_one_file(filepath: str, storage_location: str) -> None:
     path = filepath.rstrip("/")
     fs = _resolve_filesystem(path)
     try:
-        fs.get(path, storage_location, recursive=True)
+        fs.get(_encode_path_segment(path), storage_location, recursive=True)
     except Exception as e:
         if _is_auth_required(e):
             raise DownloadAuthRequiredError(path) from None
@@ -172,7 +222,7 @@ def download_one_file(filepath: str, storage_location: str) -> None:
 def pelicanlistPath(path: str):
     fs = _resolve_filesystem(path)
     try:
-        return _attach_folder_sizes(fs.ls(path))
+        return _attach_folder_sizes(fs.ls(_encode_path_segment(path)))
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f'Path "{path}" was not found on the federation.')
     except Exception as e:

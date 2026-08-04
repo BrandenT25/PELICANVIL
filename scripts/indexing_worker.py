@@ -41,8 +41,11 @@ from api.core.indexing_queue import (
 # Reusing pelican.py's own filesystem-resolution rather than re-implementing
 # it here. reset_default_filesystem is the connection-pressure safeguard
 # from the 2026-08-04 investigation — see list_path() below for how it's
-# used.
-from api.routes.pelican import _resolve_filesystem, reset_default_filesystem
+# used. _encode_path_segment is the special-character path-encoding fix
+# from the 2026-08-04 investigation into folders like "Measurement+1"
+# 404ing — see its docstring in pelican.py for the confirmed root cause
+# (aiowebdav2 silently unescaping every .ls() path before sending it).
+from api.routes.pelican import _resolve_filesystem, reset_default_filesystem, _encode_path_segment
 # _is_auth_required/_is_connection_error moved here from pelican.py in the
 # 2026-08-04 failure-visibility work, alongside the new classify_failure
 # that wraps both — see api/core/failure_classification.py's own docstring
@@ -214,7 +217,13 @@ def _index_dataset(entry: dict) -> int:
         global _ls_call_count
 
         try:
-            result = fs.ls(path)
+            # _encode_path_segment: see its docstring in api/routes/pelican.py
+            # for the confirmed root cause this works around (aiowebdav2
+            # silently unescaping every .ls() path before it reaches the
+            # wire) — path itself stays the raw, human-readable string
+            # everywhere else in this walk (staged_size, buffer, logging);
+            # only the actual fs.ls() call gets the encoded copy.
+            result = fs.ls(_encode_path_segment(path))
         except BaseException as e:
             if not _is_connection_error(e):
                 raise
@@ -228,7 +237,7 @@ def _index_dataset(entry: dict) -> int:
             fs = _resolve_filesystem(entry["path"])
             time.sleep(RETRY_BACKOFF_SECONDS)
             try:
-                result = fs.ls(path)  # a second failure here propagates — no second retry
+                result = fs.ls(_encode_path_segment(path))  # a second failure here propagates — no second retry
             except asyncio.CancelledError as e2:
                 # CancelledError is a BaseException, not an Exception —
                 # main()'s except Exception (and this task's own spec: fall
