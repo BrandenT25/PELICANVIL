@@ -401,8 +401,70 @@ def _index_dataset(entry: dict) -> int:
             update_progress(dataset_id, folders_visited)
             return cached
 
+        try:
+            entries = list_path(path)
+        except Exception as e:
+            # list_path already ran this failure through the full retry
+            # treatment its classification calls for (the full
+            # connection-class backoff loop, the small unclassified
+            # allowance, or zero retries for a confirmed data-class
+            # failure like a genuine 404 — see list_path's own docstring)
+            # before ever raising here. There is deliberately no further
+            # fallback attempt beyond that: Phase 1 of the 2026-08-04
+            # investigation into this confirmed neither of the two
+            # candidate fallbacks is worth building.
+            #   - Reusing size metadata already present in the parent's
+            #     own listing response for this child doesn't work: a
+            #     directory entry's `size` field is a fixed filesystem-
+            #     block-size placeholder (observed 4096 regardless of
+            #     actual contents — see this function's own docstring
+            #     above, from the original Phase 0 investigation), not a
+            #     real recursive total, so it can't stand in for a
+            #     genuine size even if reused for free.
+            #   - A direct existence/size check on the failing path
+            #     (e.g. a WebDAV HEAD-equivalent) turns out to already be
+            #     exactly what pelicanfs's own _ls_real does internally
+            #     before it ever raises FileNotFoundError to us — read
+            #     directly in the installed library: on a
+            #     RemoteResourceNotFoundError, it calls client.check(),
+            #     which issues the *same* PROPFIND method as the original
+            #     failed listing, against the same path, moments earlier.
+            #     A second attempt from our own code would almost
+            #     certainly just repeat that same request against the
+            #     same origin for the same answer — real load for no
+            #     realistic benefit, contrary to the mentor directive
+            #     against casual repeated federation calls.
+            #
+            # Branden's explicit decision given that: no incomplete-total
+            # flag, no "at least X" framing, no separate uncertainty
+            # tracking — this folder's contribution is simply 0, logged
+            # clearly enough that a human (or a future Claude Code
+            # session) reading the log can tell this dataset's total may
+            # be missing real data, without building anything further
+            # than that.
+            #
+            # The dataset's own root is deliberately excluded from this —
+            # if entry["path"] itself can't be listed at all, there's no
+            # "rest of the walk" to continue past; unlike a subfolder deep
+            # in an otherwise-working walk, that means this indexing
+            # attempt accomplished nothing, and silently recording a
+            # "complete, total=0" result would be genuinely misleading
+            # (indistinguishable from a dataset that legitimately has
+            # zero bytes). Re-raising here preserves today's existing
+            # behavior for that case unchanged — mark_failed at the
+            # per-dataset level, exactly as before this task.
+            if path == entry["path"]:
+                raise
+            logger.error(
+                "Folder unrecoverable for dataset_id=%s after exhausting retries: %s: %s"
+                " — no viable fallback access method (see walk()'s own comment for why) —"
+                " counting %r as 0 bytes and continuing the walk",
+                dataset_id, type(e).__name__, e, path,
+            )
+            entries = []
+
         total = 0
-        for item in list_path(path):
+        for item in entries:
             if item["type"] == "directory":
                 total += walk(item["name"])
             else:
