@@ -902,6 +902,17 @@ clamp(s_1px, calc(b + (m*100)vw), s_2px)
     font-style: italic;
     font-size: clamp(0.7rem, 0.66rem + 0.14vw, 0.76rem);
 }
+/* Distinct from .file-size-unavailable above: that means "not indexed
+   yet" (neutral, may resolve once indexing runs); this means "the
+   indexing worker tried and confirmed this folder can't be reached"
+   (missing-data fallback or a circuit-breaker abort — see
+   scripts/indexing_worker.py's walk()) — an actual finding, not just an
+   absence of data, so it gets the warning color instead of the faint one. */
+.file-size-box.file-folder-unavailable{
+    color: var(--warning);
+    font-style: italic;
+    font-size: clamp(0.7rem, 0.66rem + 0.14vw, 0.76rem);
+}
 
 .dataset-meta-size{
     color: var(--accent-text);

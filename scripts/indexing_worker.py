@@ -149,6 +149,81 @@ CONNECTION_RETRY_BACKOFFS = [5, 15, 45]
 UNCLASSIFIED_RETRY_ATTEMPTS = 1
 UNCLASSIFIED_RETRY_BACKOFF_SECONDS = 10
 
+# Circuit breaker (2026-08-05 investigation): CONNECTION_RETRY_BACKOFFS
+# above is designed for, and confirmed effective against, a transient,
+# recoverable connection blip on an otherwise-healthy origin (the
+# 2026-08-04 dataset_id=17 OSError case). It is NOT designed for, and was
+# observed actively making worse, a different failure shape: sustained
+# origin/Director unreachability. Real evidence, 2026-08-05, dataset_id=3
+# (noaa-goes18): every single folder across a ~20-hour span (the entire
+# ABI-L1b-RadM/2023-2026 day-of-year tree, then a long run of ABI-L2-*
+# product folders) failed with fsspec.exceptions.FSTimeoutError, always
+# only after exhausting the full 4-attempt/~90-110s retry cycle, never
+# once succeeding on a fresh post-reset attempt.
+#
+# Traced to source by reading the installed pelicanfs package directly and
+# reproducing the exception chain: FSTimeoutError comes from pelicanfs's
+# get_dirlist_url() (Director PROPFIND resolution, which runs before the
+# actual listing call), which uses a *hardcoded* 5-second
+# aiohttp.ClientTimeout with no try/except around it (unlike the sibling
+# cache-selection loop in get_working_cache, which does catch its own
+# timeout and treats it as "try the next cache") — and that 5s value isn't
+# exposed through any pelicanfs/OSDFFileSystem constructor kwarg. Per this
+# project's standing convention against touching third-party source, that
+# timeout value itself is not something pelican-ui's own code can adjust;
+# a Director that's sustained-degraded (or simply can't answer a
+# particular request pattern within 5s) will keep producing this exact
+# failure regardless of how many times list_path resets and retries —
+# which is exactly what the real log shows.
+#
+# CIRCUIT_BREAKER_CONSECUTIVE_FAILURES: once this many *different* folders
+# in a row (not retries on the same folder — that's CONNECTION_RETRY_BACKOFFS
+# above; this counts folders that each already exhausted that whole loop)
+# have failed this way with no successful or data-class response in
+# between, treat that as confirmed evidence of sustained origin trouble
+# rather than a run of bad luck, and abort the dataset immediately instead
+# of paying the full ~90-110s retry cost on every remaining folder — at
+# the real noaa-goes18 run's rate, a dataset this deep would otherwise
+# take weeks to exhaust its walk while still recording a wildly wrong
+# near-zero total, exactly the failure mode this circuit breaker exists to
+# close. 5 is deliberately small as a *folder* count, but not as an
+# *attempt* count: each folder counted here already cost 4 real requests
+# against the origin over ~90-110s (the existing retry loop's own cost,
+# not additional load this change introduces), so 5 consecutive failures
+# is already ~20 real requests spread over roughly 7.5-9 minutes — enough
+# to be confident it isn't coincidence, without waiting much longer to act
+# on it. A single confirmed data-class response (a real 404/401/403) or a
+# single successful listing anywhere in between resets the count to 0 —
+# see walk()'s own handling — so a genuinely recovering or merely-flaky
+# origin does not trip this. A reasoned starting point, same spirit as
+# PROACTIVE_RESET_CALLS and CONNECTION_RETRY_BACKOFFS above — adjustable
+# from real trip-outcome data once this is live.
+CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 5
+
+
+class _ConnectionClassExhausted(Exception):
+    """Raised by _retry_connection_class once its full backoff schedule is
+    exhausted for one folder — a distinct wrapper (rather than letting the
+    bare underlying exception propagate) so walk()'s circuit breaker can
+    recognize "this folder's connection-class retry loop ran out" by type
+    alone, without re-classifying the terminal exception itself. Re-
+    classifying there would be unreliable: _reraise_cancelled_as_exception
+    below already converts a terminal CancelledError into a plain
+    RuntimeError before it gets here, which would lose the
+    isinstance-checkable "this was connection-class" signal a second
+    classification pass in walk() would need.
+    """
+
+
+class CircuitBreakerTripped(Exception):
+    """Raised by walk() when CIRCUIT_BREAKER_CONSECUTIVE_FAILURES
+    consecutive *different* folders in one dataset's walk have each
+    individually exhausted the full connection-class retry loop (a
+    _ConnectionClassExhausted each), with no successful or confirmed
+    data-class response in between. See CIRCUIT_BREAKER_CONSECUTIVE_FAILURES'
+    module-level comment above for the evidence and reasoning behind this."""
+
+
 # Running count of .ls() calls made on the *current* filesystem instance,
 # since it was last (re)created — module-level and reset to 0 by either
 # safeguard firing, not scoped to a single dataset's walk (see
@@ -162,14 +237,36 @@ _STAGING_TABLE_SQL = """CREATE TABLE IF NOT EXISTS dataset_folder_sizes_staging 
     dataset_id INTEGER NOT NULL,
     folder_path TEXT NOT NULL,
     size_bytes INTEGER NOT NULL,
+    unavailable INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (dataset_id, folder_path)
 )"""
+
+
+def _ensure_unavailable_column(con: sqlite3.Connection, table: str) -> None:
+    """`unavailable` (2026-08-05, Part 3): distinguishes a folder that's
+    confirmed unrecoverable (missing-data fallback or circuit-breaker abort
+    — see walk()'s own handling) from a folder that's genuinely, legitimately
+    0 bytes; both used to be stored identically as size_bytes=0, which the
+    dataset browser couldn't tell apart. CREATE TABLE IF NOT EXISTS above is
+    a no-op against a table that already exists from before this column was
+    added (the real shared pelican.db has been running since before this
+    week), so this ALTER is the actual migration for any pre-existing
+    deployment; "duplicate column" is the expected, harmless outcome once
+    it's already been added once (in-process or by an earlier run), same
+    "catch and ignore the already-applied case" shape as every other
+    lazy-migration in this codebase.
+    """
+    try:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN unavailable INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
 
 
 def _count_staged(dataset_id: int) -> int:
     con = sqlite3.connect(DB_PATH)
     try:
         con.execute(_STAGING_TABLE_SQL)
+        _ensure_unavailable_column(con, "dataset_folder_sizes_staging")
         row = con.execute(
             "SELECT COUNT(*) FROM dataset_folder_sizes_staging WHERE dataset_id = ?", (dataset_id,)
         ).fetchone()
@@ -214,14 +311,21 @@ def _index_dataset(entry: dict) -> int:
     dataset_id = entry["dataset_id"]
     con = sqlite3.connect(DB_PATH)
     con.execute(_STAGING_TABLE_SQL)
+    _ensure_unavailable_column(con, "dataset_folder_sizes_staging")
     folders_visited = 0
-    buffer: list[tuple[int, str, int]] = []
+    buffer: list[tuple[int, str, int, int]] = []
+    # See CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' module-level comment.
+    # Counts *different* folders that each exhausted the connection-class
+    # retry loop in a row; reset to 0 by any successful listing or any
+    # confirmed data-class response (see walk() below).
+    consecutive_connection_failures = 0
 
     def flush() -> None:
         if not buffer:
             return
         con.executemany(
-            "INSERT OR REPLACE INTO dataset_folder_sizes_staging (dataset_id, folder_path, size_bytes) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO dataset_folder_sizes_staging"
+            " (dataset_id, folder_path, size_bytes, unavailable) VALUES (?, ?, ?, ?)",
             buffer,
         )
         con.commit()
@@ -295,7 +399,10 @@ def _index_dataset(entry: dict) -> int:
             "Connection-class retries exhausted for dataset_id=%s after %d attempt(s): %s",
             dataset_id, len(CONNECTION_RETRY_BACKOFFS) + 1, type(exc).__name__,
         )
-        _reraise_cancelled_as_exception(exc)
+        try:
+            _reraise_cancelled_as_exception(exc)
+        except BaseException as final_exc:
+            raise _ConnectionClassExhausted(f"{type(final_exc).__name__}: {final_exc}") from final_exc
 
     def _retry_unclassified(path: str, encoded: str, first_exc: BaseException) -> list:
         """Small, separate safety net for exceptions _is_connection_error
@@ -394,15 +501,21 @@ def _index_dataset(entry: dict) -> int:
         return result
 
     def walk(path: str) -> int:
-        nonlocal folders_visited
+        nonlocal folders_visited, consecutive_connection_failures
         cached = staged_size(path)
         if cached is not None:
             folders_visited += 1
             update_progress(dataset_id, folders_visited)
             return cached
 
+        folder_unavailable = False
         try:
             entries = list_path(path)
+            # A successful listing is the strongest possible signal the
+            # origin/Director is currently answering normally — see
+            # CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' comment on why this
+            # resets the streak rather than just decaying it.
+            consecutive_connection_failures = 0
         except Exception as e:
             # list_path already ran this failure through the full retry
             # treatment its classification calls for (the full
@@ -455,6 +568,39 @@ def _index_dataset(entry: dict) -> int:
             # per-dataset level, exactly as before this task.
             if path == entry["path"]:
                 raise
+
+            # Circuit breaker (see CIRCUIT_BREAKER_CONSECUTIVE_FAILURES'
+            # module-level comment): only a _ConnectionClassExhausted
+            # counts toward the streak — a confirmed data-class response
+            # (real 404/401/403, classify_failure().code != "unknown")
+            # is itself evidence the origin is reachable and answering
+            # normally, so it resets the streak rather than leaving it
+            # alone; a genuinely unclassified exhaustion is left as-is,
+            # since it's neither confirmed origin trouble nor confirmed
+            # origin health.
+            if isinstance(e, _ConnectionClassExhausted):
+                consecutive_connection_failures += 1
+                logger.warning(
+                    "Circuit breaker: %d/%d consecutive connection-class folder"
+                    " failures for dataset_id=%s",
+                    consecutive_connection_failures, CIRCUIT_BREAKER_CONSECUTIVE_FAILURES, dataset_id,
+                )
+                if consecutive_connection_failures >= CIRCUIT_BREAKER_CONSECUTIVE_FAILURES:
+                    logger.error(
+                        "Circuit breaker TRIPPED for dataset_id=%s: %d consecutive folders failed"
+                        " with connection-class errors (most recent: %s) — aborting this dataset"
+                        " early rather than continuing to retry against what looks like sustained"
+                        " origin/Director trouble",
+                        dataset_id, consecutive_connection_failures, e,
+                    )
+                    raise CircuitBreakerTripped(
+                        f"Origin appears unreachable or sustained-degraded: "
+                        f"{consecutive_connection_failures} consecutive folders failed with "
+                        f"connection-class errors (most recent: {e})."
+                    ) from e
+            elif classify_failure(e).code != "unknown":
+                consecutive_connection_failures = 0
+
             logger.error(
                 "Folder unrecoverable for dataset_id=%s after exhausting retries: %s: %s"
                 " — no viable fallback access method (see walk()'s own comment for why) —"
@@ -462,6 +608,20 @@ def _index_dataset(entry: dict) -> int:
                 dataset_id, type(e).__name__, e, path,
             )
             entries = []
+            # Part 3 (2026-08-05): distinct from a folder that's genuinely,
+            # legitimately 0 bytes — see _ensure_unavailable_column's
+            # docstring. Both the missing-data-fallback path above and a
+            # circuit-breaker-triggered abort (the folders that already ran
+            # through this same except block on the way to tripping —
+            # CircuitBreakerTripped itself is raised above, before reaching
+            # here, only for the one folder whose failure crosses the
+            # threshold, so that one folder's own row is never staged at
+            # all; the dataset ends up "failed", not "complete", exactly
+            # like a root-path failure) both flow through this one
+            # "unrecoverable, log and continue/abort" branch, so marking it
+            # unavailable here covers both causes with one line, matching
+            # Branden's "one shared badge, not two" call.
+            folder_unavailable = True
 
         total = 0
         for item in entries:
@@ -470,7 +630,7 @@ def _index_dataset(entry: dict) -> int:
             else:
                 total += item.get("size") or 0
         folders_visited += 1
-        buffer.append((dataset_id, path.rstrip("/"), total))
+        buffer.append((dataset_id, path.rstrip("/"), total, int(folder_unavailable)))
         if len(buffer) >= _STAGING_BATCH_SIZE:
             flush()
         update_progress(dataset_id, folders_visited)
@@ -479,6 +639,14 @@ def _index_dataset(entry: dict) -> int:
     try:
         walk(entry["path"])
         flush()
+    except CircuitBreakerTripped:
+        # Same reasoning as a normal mid-walk crash (see main()'s own
+        # comment on this): nothing staged so far should be lost just
+        # because this dataset is being aborted early rather than
+        # crashing outright — flush the buffer one last time before
+        # letting this propagate to main()'s except block.
+        flush()
+        raise
     finally:
         con.close()
 
@@ -505,14 +673,17 @@ def _finalize_folder_sizes(dataset_id: int) -> None:
                 folder_path TEXT NOT NULL,
                 size_bytes INTEGER NOT NULL,
                 indexed_at TEXT NOT NULL,
+                unavailable INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (dataset_id, folder_path)
             )"""
         )
+        _ensure_unavailable_column(con, "dataset_folder_sizes")
         con.execute(_STAGING_TABLE_SQL)
+        _ensure_unavailable_column(con, "dataset_folder_sizes_staging")
         con.execute("DELETE FROM dataset_folder_sizes WHERE dataset_id = ?", (dataset_id,))
         con.execute(
-            """INSERT INTO dataset_folder_sizes (dataset_id, folder_path, size_bytes, indexed_at)
-               SELECT dataset_id, folder_path, size_bytes, ?
+            """INSERT INTO dataset_folder_sizes (dataset_id, folder_path, size_bytes, indexed_at, unavailable)
+               SELECT dataset_id, folder_path, size_bytes, ?, unavailable
                FROM dataset_folder_sizes_staging WHERE dataset_id = ?""",
             (now, dataset_id),
         )
@@ -562,7 +733,16 @@ def main() -> None:
             mark_complete(entry["dataset_id"], folders_visited)
             logger.info("Completed dataset_id=%s (%d folders)", entry["dataset_id"], folders_visited)
         except Exception as e:
-            if _is_auth_required(e):
+            if isinstance(e, CircuitBreakerTripped):
+                # A confirmed, well-understood category in its own right
+                # (see CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' module-level
+                # comment) — not the genuinely-surprising "unknown" catch-all
+                # classify_failure would otherwise sort this into, so this
+                # is checked first and skips log_unexpected_pelican_error
+                # below, same as every other already-understood category.
+                error_category = "circuit_breaker"
+                message = str(e)
+            elif _is_auth_required(e):
                 error_category = "auth_required"
                 message = f'"{entry["path"]}" requires an access token and none is stored for it.'
             else:

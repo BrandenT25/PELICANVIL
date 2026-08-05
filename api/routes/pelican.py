@@ -117,43 +117,55 @@ def _encode_path_segment(path: str) -> str:
 def _attach_folder_sizes(entries: list) -> list:
     """Annotates each directory entry in a .ls() result with real_size (an
     int, from the indexing worker's dataset_folder_sizes table) when known,
-    else None. Keyed purely by path, not dataset id — quick-access.js's file
-    browser has no dataset entity at all (just a pasted path), so a
-    dataset-scoped lookup wouldn't work for it; this is the one place both
-    datasets.js's and quick-access.js's file browsers get real folder sizes
-    from, since both already call this same route.
+    else None, and with unavailable (bool) — True when the indexing worker
+    confirmed this exact folder was unrecoverable (missing-data fallback or
+    a circuit-breaker abort — see scripts/indexing_worker.py's walk() and
+    its `unavailable` column, added 2026-08-05 Part 3) rather than
+    genuinely, legitimately 0 bytes. Keyed purely by path, not dataset id —
+    quick-access.js's file browser has no dataset entity at all (just a
+    pasted path), so a dataset-scoped lookup wouldn't work for it; this is
+    the one place both datasets.js's and quick-access.js's file browsers
+    get real folder sizes (and now this status) from, since both already
+    call this same route.
 
     Batches into a single query rather than one per directory entry. Table
-    may not exist yet on a fresh deployment (the worker creates it lazily on
-    its first successful run, see scripts/indexing_worker.py) — that's not
-    an error, it just means nothing is indexed yet, so every entry gets
-    real_size: None.
+    (or the unavailable column on it, for a DB that predates 2026-08-05)
+    may not exist yet on a fresh deployment (the worker creates/migrates it
+    lazily on its first successful run, see scripts/indexing_worker.py) —
+    that's not an error, it just means nothing is indexed yet, so every
+    entry gets real_size: None, unavailable: False.
     """
     dir_paths = [e["name"].rstrip("/") for e in entries if e.get("type") == "directory"]
     if not dir_paths:
         return entries
 
     sizes: dict[str, int] = {}
+    unavailable_paths: dict[str, bool] = {}
     try:
         con = sqlite3.connect(DB_PATH)
         try:
             placeholders = ",".join("?" * len(dir_paths))
             cur = con.cursor()
             cur.execute(
-                f"SELECT folder_path, size_bytes FROM dataset_folder_sizes WHERE folder_path IN ({placeholders})",
+                f"SELECT folder_path, size_bytes, unavailable FROM dataset_folder_sizes"
+                f" WHERE folder_path IN ({placeholders})",
                 dir_paths,
             )
-            sizes = dict(cur.fetchall())
+            for folder_path, size_bytes, unavailable in cur.fetchall():
+                sizes[folder_path] = size_bytes
+                unavailable_paths[folder_path] = bool(unavailable)
         finally:
             con.close()
     except sqlite3.OperationalError:
-        # table doesn't exist yet (nothing has ever finished indexing) —
-        # every entry just stays real_size: None below, not an error
+        # table (or unavailable column) doesn't exist yet — every entry
+        # just stays real_size: None, unavailable: False below, not an error
         pass
 
     for entry in entries:
         if entry.get("type") == "directory":
-            entry["real_size"] = sizes.get(entry["name"].rstrip("/"))
+            key = entry["name"].rstrip("/")
+            entry["real_size"] = sizes.get(key)
+            entry["unavailable"] = unavailable_paths.get(key, False)
     return entries
 
 

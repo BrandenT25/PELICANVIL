@@ -638,6 +638,16 @@
     font-style: italic;
     font-size: 0.65rem;
 }
+/* Distinct from .file-size-unavailable above: that means "not indexed
+   yet"; this means the indexing worker tried and confirmed this folder
+   can't be reached — see datasets.css's copy of this rule for the full
+   reasoning (same intentional per-page duplication as everything else
+   in this file). */
+.file-size-box.file-folder-unavailable{
+    color: var(--warning);
+    font-style: italic;
+    font-size: 0.65rem;
+}
 
 /* #endregion */
 

@@ -553,9 +553,21 @@ async function makeFolderCards(path, container, download_card, breadcrumbs, isRe
     // that was never a real content size to begin with.
     let sizeKnown = true;
     let sizeLabel = "";
+    // Distinct from sizeKnown === false ("not indexed yet, may resolve
+    // later"): the indexing worker tried this exact folder and confirmed
+    // it can't be reached (missing-data fallback or a circuit-breaker
+    // abort — see scripts/indexing_worker.py's walk() and its
+    // `unavailable` column, attached server-side by _attach_folder_sizes).
+    // Checked before the real_size null/undefined branch below, since an
+    // unavailable folder is stored with real_size 0 (a real, known
+    // number) — not null — so it would otherwise render as a normal
+    // "0 Bytes" folder instead of standing out as a confirmed finding.
+    let isUnavailable = false;
     if (folder_path["type"] === "directory") {
       imageFile = "folder-icon.png";
-      if (folder_path["real_size"] === null || folder_path["real_size"] === undefined) {
+      if (folder_path["unavailable"]) {
+        isUnavailable = true;
+      } else if (folder_path["real_size"] === null || folder_path["real_size"] === undefined) {
         sizeKnown = false;
       } else {
         fileBytes = folder_path["real_size"];
@@ -577,7 +589,11 @@ async function makeFolderCards(path, container, download_card, breadcrumbs, isRe
         </label>
         <div class="icon-size-stack">
           <img src="${window.ROOT_PATH}/api/static/img/${imageFile}" alt="folder-icon" height="20"></img>
-          ${sizeKnown ? `<div class="file-size-box">${sizeLabel}</div>` : `<div class="file-size-box file-size-unavailable">Size unavailable</div>`}
+          ${isUnavailable
+            ? `<div class="file-size-box file-folder-unavailable" title="This folder couldn't be reached during indexing">Unavailable</div>`
+            : sizeKnown
+              ? `<div class="file-size-box">${sizeLabel}</div>`
+              : `<div class="file-size-box file-size-unavailable">Size unavailable</div>`}
         </div>
         <div class="folder-info-stack">
           <div class="folder-name-box" title="${name}">
