@@ -45,6 +45,7 @@ async function displayDataset(toggle){
                     <span class="index-status-reason"></span>
                 </div>
                 <div class="modify-wrapper">
+                    <i class="fa fa-stop-circle" id="cancel-index-btn" title="Cancel indexing" style="display:none"></i>
                     <i class="fa fa-refresh" id="reindex-btn" title="Re-index dataset size"></i>
                     <i class="fa fa-edit" id="modify-btn"></i>
                     <i class="fa fa-trash" id="remove-btn"></i>
@@ -54,6 +55,7 @@ async function displayDataset(toggle){
             const modifybtn = datasetCard.querySelector("#modify-btn")
             const removeBtn = datasetCard.querySelector("#remove-btn")
             const reindexBtn = datasetCard.querySelector("#reindex-btn")
+            const cancelIndexBtn = datasetCard.querySelector("#cancel-index-btn")
             modifybtn.addEventListener("click", async () =>{
                 editDataset(dataset)
                 displayDataset(true)
@@ -77,6 +79,32 @@ async function displayDataset(toggle){
                     return
                 }
                 showToast(`Re-indexing "${dataset.name}" queued.`, "success")
+                refreshIndexStatus(datasetCard, dataset.id)
+            })
+            cancelIndexBtn.addEventListener("click", async () => {
+                // Destructive-ish against real in-progress work — a simple
+                // confirm is enough per this feature's own scope, no need
+                // for a full modal like the delete-dataset flow uses.
+                if (!confirm(`Cancel indexing for "${dataset.name}"? Progress so far will be kept and resumed on the next re-index.`)) {
+                    return
+                }
+                cancelIndexBtn.classList.add("disabled")
+                const result = await cancelIndexing(dataset.id)
+                if (!result.ok) {
+                    showToast(result.error, "error")
+                    cancelIndexBtn.classList.remove("disabled")
+                    return
+                }
+                showToast(`Cancelling "${dataset.name}"…`, "success")
+                // Reuses the exact same status-poll refresh the Re-index
+                // button already triggers — the worker notices the cancel
+                // flag within roughly one folder's latency (see
+                // scripts/indexing_worker.py's IndexingCancelled), so the
+                // badge is likely still "Indexing…" for a moment; the
+                // existing 3s poll (already running, since the status is
+                // still in_progress) picks up the transition to
+                // "cancelled" on its own, same as it would for any other
+                // status change — no new polling logic needed here.
                 refreshIndexStatus(datasetCard, dataset.id)
             })
             cardWrapper.appendChild(datasetCard)
@@ -794,6 +822,7 @@ const INDEX_STATUS_LABELS = {
     in_progress: "Indexing…",
     complete: "Indexed",
     failed: "Index failed",
+    cancelled: "Cancelled",
 }
 // Only these two are worth polling — everything else is a resting state
 // until the manual Re-index button or auto-enqueue-on-create fires again.
@@ -806,6 +835,12 @@ async function fetchIndexStatus(datasetId){
 
 async function triggerReindex(datasetId){
     return adminRequest(`${window.ROOT_PATH}/admin/datasets/${datasetId}/reindex`, {
+        method: "POST",
+    })
+}
+
+async function cancelIndexing(datasetId){
+    return adminRequest(`${window.ROOT_PATH}/admin/datasets/${datasetId}/cancel-index`, {
         method: "POST",
     })
 }
@@ -864,6 +899,21 @@ function renderIndexBadge(datasetCard, status){
             ? status.error_message
             : ""
         reason.style.display = reason.textContent ? "" : "none"
+    }
+    // Cancel only ever makes sense against a dataset that's actually
+    // running right now — see this feature's own out-of-scope note (no
+    // cancelling a queued-but-not-started or already-resting entry). Only
+    // the visibility is driven from here (this function runs on every
+    // poll tick and is the one place that knows the *current* status);
+    // the "disabled" class deliberately isn't touched here — the click
+    // handler manages that itself (disables on click, re-enables only on
+    // a failed request), so a successful cancel stays disabled for the
+    // ~1-folder-latency window until the badge actually leaves
+    // in_progress and the button disappears, instead of re-enabling and
+    // inviting a redundant second click on every 3s poll in between.
+    const cancelBtn = datasetCard.querySelector("#cancel-index-btn")
+    if (cancelBtn) {
+        cancelBtn.style.display = status.status === "in_progress" ? "" : "none"
     }
 }
 

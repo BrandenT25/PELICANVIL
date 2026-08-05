@@ -122,18 +122,61 @@ def claim_next_pending() -> dict | None:
     return _with_state(mutator)
 
 
-def update_progress(dataset_id: int, folders_done: int) -> None:
+def update_progress(dataset_id: int, folders_done: int) -> bool:
     """Called repeatedly by the worker while walking a dataset, so the admin
     panel's status poll can show live progress. Cheap, small write — this is
     distinct from the catalog db, which only gets written once at the end
-    (see scripts/indexing_worker.py's _write_folder_sizes)."""
+    (see scripts/indexing_worker.py's _write_folder_sizes).
+
+    Returns True if a cancel has been requested for this dataset (see
+    request_cancel below) since the last check. Piggybacked onto this same
+    read-modify-write rather than a separate file read every folder: this
+    function is already called once per folder for progress reporting (see
+    scripts/indexing_worker.py's walk()), already holds the lock, and
+    already has `current` — the exact same entry the cancel flag lives on
+    — in hand, so checking it here costs nothing extra and needs no new
+    poll loop of its own, per this feature's own design constraint.
+    """
 
     def mutator(state):
-        if state["current"] is not None and state["current"]["dataset_id"] == dataset_id:
-            state["current"]["folders_done"] = folders_done
-        return state, None
+        current = state["current"]
+        if current is not None and current["dataset_id"] == dataset_id:
+            current["folders_done"] = folders_done
+            return state, bool(current.get("cancel_requested"))
+        return state, False
 
-    _with_state(mutator)
+    return _with_state(mutator)
+
+
+def request_cancel(dataset_id: int) -> bool:
+    """Called from the admin panel's Cancel action (api/routes/indexing.py).
+    Sets a flag on the `current` entry rather than a separate
+    cancellation-requests list — there's only ever one `current` entry at a
+    time in this single-worker design, so a flag on it is the more direct
+    fit than a parallel list that would need its own cross-referencing.
+
+    The worker notices this via update_progress's return value above, once
+    per folder — not instantly, but within roughly one folder's worth of
+    latency, which is the explicit design tradeoff this feature makes
+    (rather than hard-interrupting a live network call) — see
+    scripts/indexing_worker.py's IndexingCancelled for the rest of that
+    reasoning.
+
+    Returns True if a cancel was actually recorded (dataset_id was truly
+    the current in-progress entry) so the route can give an honest 409
+    instead of a queued-into-the-void 200 for a dataset that isn't
+    actually running — mirrors claim_next_pending's same "return whether
+    the state-changing part actually happened" shape.
+    """
+
+    def mutator(state):
+        current = state["current"]
+        if current is None or current["dataset_id"] != dataset_id:
+            return state, False
+        current["cancel_requested"] = True
+        return state, True
+
+    return _with_state(mutator)
 
 
 def _finish_current(dataset_id: int, status: str, error_message: str | None, folders_done: int | None, error_category: str | None = None) -> None:
@@ -166,6 +209,14 @@ def mark_failed(dataset_id: int, error_message: str, folders_done: int | None = 
     # failed" the same way the Downloads page does for failed files,
     # instead of a raw exception string with no machine-readable shape.
     _finish_current(dataset_id, "failed", error_message, folders_done, error_category)
+
+
+def mark_cancelled(dataset_id: int, folders_done: int | None = None) -> None:
+    # A distinct status ("cancelled"), not "failed" — this was a deliberate
+    # admin action, not an error, and the admin panel/logs should read that
+    # way rather than looking like a crash or a circuit-breaker trip (see
+    # scripts/indexing_worker.py's IndexingCancelled).
+    _finish_current(dataset_id, "cancelled", "Cancelled by an admin.", folders_done, "cancelled")
 
 
 def recover_interrupted() -> None:

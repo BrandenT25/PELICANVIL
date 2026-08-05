@@ -33,6 +33,7 @@ import sqlite3
 from api.core.config import DB_PATH
 from api.core.indexing_queue import (
     claim_next_pending,
+    mark_cancelled,
     mark_complete,
     mark_failed,
     recover_interrupted,
@@ -222,6 +223,32 @@ class CircuitBreakerTripped(Exception):
     _ConnectionClassExhausted each), with no successful or confirmed
     data-class response in between. See CIRCUIT_BREAKER_CONSECUTIVE_FAILURES'
     module-level comment above for the evidence and reasoning behind this."""
+
+
+class IndexingCancelled(Exception):
+    """Raised by walk() when update_progress() (api/core/indexing_queue.py)
+    reports that an admin has requested a cancel for this dataset via the
+    admin panel's Cancel action (POST /admin/datasets/{id}/cancel-index,
+    see api/routes/indexing.py). Checked once per folder, piggybacked onto
+    the same per-folder update_progress() write this walk already makes —
+    see that function's own docstring for why this needs no separate poll
+    loop and why noticing within roughly one folder's latency (rather than
+    hard-interrupting whatever single fs.ls() call might currently be
+    outstanding) is the deliberate tradeoff here: this worker is strictly
+    single-threaded and sequential, one call in flight at a time, so
+    "wait for the current call to finish or time out via its own existing
+    retry/timeout handling, then notice the flag" bounds the delay to
+    however long that one call already takes — no worse than a normal
+    connection-class retry cycle — without the real complexity of trying
+    to cancel a live network call out from under pelicanfs/aiowebdav2.
+
+    A distinct category from CircuitBreakerTripped above (a system
+    decision, made from repeated failure evidence) and from a genuine
+    data-class/connection-class failure (something going wrong) — this is
+    a deliberate, healthy admin action, and main() below gives it its own
+    "cancelled" status/error_category so it reads that way in the admin
+    panel and logs rather than looking like any of those.
+    """
 
 
 # Running count of .ls() calls made on the *current* filesystem instance,
@@ -500,12 +527,22 @@ def _index_dataset(entry: dict) -> int:
 
         return result
 
+    def _update_progress_and_check_cancel(folders_done: int) -> None:
+        # The one place both of walk()'s update_progress() calls go through
+        # — see IndexingCancelled's own docstring for why checking here,
+        # once per folder, is the right granularity (piggybacked on a write
+        # this walk already makes, no new poll loop).
+        if update_progress(dataset_id, folders_done):
+            raise IndexingCancelled(
+                f"Indexing of dataset_id={dataset_id} was cancelled by an admin."
+            )
+
     def walk(path: str) -> int:
         nonlocal folders_visited, consecutive_connection_failures
         cached = staged_size(path)
         if cached is not None:
             folders_visited += 1
-            update_progress(dataset_id, folders_visited)
+            _update_progress_and_check_cancel(folders_visited)
             return cached
 
         folder_unavailable = False
@@ -633,18 +670,21 @@ def _index_dataset(entry: dict) -> int:
         buffer.append((dataset_id, path.rstrip("/"), total, int(folder_unavailable)))
         if len(buffer) >= _STAGING_BATCH_SIZE:
             flush()
-        update_progress(dataset_id, folders_visited)
+        _update_progress_and_check_cancel(folders_visited)
         return total
 
     try:
         walk(entry["path"])
         flush()
-    except CircuitBreakerTripped:
+    except (CircuitBreakerTripped, IndexingCancelled):
         # Same reasoning as a normal mid-walk crash (see main()'s own
         # comment on this): nothing staged so far should be lost just
         # because this dataset is being aborted early rather than
         # crashing outright — flush the buffer one last time before
-        # letting this propagate to main()'s except block.
+        # letting this propagate to main()'s except block. A cancel gets
+        # exactly the same resumable-staged-progress treatment as every
+        # other abort here (see main()'s own comment for why that's the
+        # deliberate choice, not an oversight).
         flush()
         raise
     finally:
@@ -733,7 +773,18 @@ def main() -> None:
             mark_complete(entry["dataset_id"], folders_visited)
             logger.info("Completed dataset_id=%s (%d folders)", entry["dataset_id"], folders_visited)
         except Exception as e:
-            if isinstance(e, CircuitBreakerTripped):
+            cancelled = isinstance(e, IndexingCancelled)
+            if cancelled:
+                # A deliberate admin action, not an error — see
+                # IndexingCancelled's own docstring. Handled first and
+                # separately from every category below: it gets its own
+                # "cancelled" *status* (via mark_cancelled, not mark_failed
+                # — see the end of this block), not just an error_category
+                # under "failed", so the admin panel and history read it as
+                # a healthy stop rather than any kind of failure.
+                error_category = "cancelled"
+                message = str(e)
+            elif isinstance(e, CircuitBreakerTripped):
                 # A confirmed, well-understood category in its own right
                 # (see CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' module-level
                 # comment) — not the genuinely-surprising "unknown" catch-all
@@ -762,13 +813,21 @@ def main() -> None:
                     # indexing failures that already existed for web-request
                     # failures via this same log file.
                     log_unexpected_pelican_error(entry["path"], e)
-            logger.exception("Indexing failed for dataset_id=%s", entry["dataset_id"])
-            # Nothing is lost on a mid-walk crash: every folder finished so
-            # far was already streamed to dataset_folder_sizes_staging (see
+            if cancelled:
+                # info, not exception — a full traceback dump would read as
+                # a crash, which this deliberately isn't.
+                logger.info("Indexing cancelled for dataset_id=%s", entry["dataset_id"])
+            else:
+                logger.exception("Indexing failed for dataset_id=%s", entry["dataset_id"])
+            # Nothing is lost on a mid-walk crash — or a cancel, which gets
+            # exactly the same treatment: every folder finished so far was
+            # already streamed to dataset_folder_sizes_staging (see
             # _index_dataset), not held in memory. Surface that here instead
             # of letting it sit as a silent mystery, and leave it in place —
             # the next claim of this dataset_id resumes from it rather than
-            # re-walking from scratch.
+            # re-walking from scratch. Cancelling on purpose is not evidence
+            # the partial data is bad; there's no reason to make a deliberate
+            # stop *more* wasteful to recover from than an accidental crash.
             partial_count = _count_staged(entry["dataset_id"])
             if partial_count:
                 message += (
@@ -779,10 +838,15 @@ def main() -> None:
                     "Partial progress preserved for dataset_id=%s: %d folders staged",
                     entry["dataset_id"], partial_count,
                 )
-            mark_failed(entry["dataset_id"], message, folders_done=partial_count or None, error_category=error_category)
-            # No re-raise: a failed job must not take the worker process down
-            # with it — the loop goes back to idling and stays able to pick
-            # up the next queued entry, per Phase 1's failure-handling spec.
+            if cancelled:
+                mark_cancelled(entry["dataset_id"], folders_done=partial_count or None)
+            else:
+                mark_failed(entry["dataset_id"], message, folders_done=partial_count or None, error_category=error_category)
+            # No re-raise: a failed job (or a cancel) must not take the
+            # worker process down with it — the loop goes back to idling
+            # and stays able to pick up the next queued entry immediately,
+            # per Phase 1's failure-handling spec and this feature's own
+            # "does not stop the worker" scope constraint.
 
 
 if __name__ == "__main__":

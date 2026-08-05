@@ -255,6 +255,14 @@
     background-color: rgba(var(--error-rgb), 0.14);
     cursor: help;
 }
+/* Neutral, not red — a cancel is a deliberate admin action, not an error
+   (see scripts/indexing_worker.py's IndexingCancelled), so it gets the
+   same muted treatment as queued/never_indexed rather than looking like
+   a failure. */
+.index-status-badge-cancelled{
+    color: var(--text-muted);
+    background-color: rgba(var(--muted-rgb), 0.14);
+}
 /* Visible failure reason next to the badge (2026-08-04) — the real message
    already lived in the badge's title tooltip, but a hover-only native
    tooltip is easy to miss entirely; this makes it readable by default,
@@ -272,6 +280,10 @@
 }
 
 #reindex-btn.disabled{
+    opacity: 0.5;
+    pointer-events: none;
+}
+#cancel-index-btn.disabled{
     opacity: 0.5;
     pointer-events: none;
 }
