@@ -200,6 +200,81 @@ class DownloadAuthRequiredError(DownloadError):
         super().__init__(f'"{namespace}" requires an access token.', "auth_required")
 
 
+def _walk_remote_files(fs, path: str) -> list:
+    """Sequentially enumerates every real file under `path`, recursing
+    through directories via this app's own already-trusted fs.ls() (the same
+    call pelicanlistPath's browsing already relies on) — used only by
+    _download_directory below. One fs.ls() call at a time, no concurrency,
+    matching this whole call site's "never issue overlapping Pelican
+    requests" shape (see reset_default_filesystem's docstring / scripts/
+    indexing_worker.py's own single-threaded walk).
+
+    Returns raw, human-readable remote paths (not percent-encoded) — same
+    convention as everywhere else in this app; _encode_path_segment is
+    applied right before each actual fs.ls()/fs.get_file() call, not stored.
+    """
+    entries = fs.ls(_encode_path_segment(path), detail=True)
+    files: list = []
+    for entry in entries:
+        name = entry["name"].rstrip("/")
+        if entry.get("type") == "directory":
+            files.extend(_walk_remote_files(fs, name))
+        else:
+            files.append(name)
+    return files
+
+
+def _download_directory(fs, path: str, storage_location: str) -> None:
+    """2026-08-06 (GitHub issue #3): fs.get(dir, dest, recursive=True) is
+    confirmed broken for directories. Traced live against the real
+    federation (aws-opendata/us-west-2/ai2-public-datasets/beliefbank):
+    PelicanFileSystem._get resolves ONE cache URL for the whole call, then
+    hands off to a plain, non-Pelican-aware fsspec.HTTPFileSystem for the
+    actual recursive walk+write — whose own directory/file-boundary
+    detection can resolve one branch against a *different* host than the
+    rest of the tree. Confirmed by direct inspection: this produces one
+    real file under the correct cache-host-named folder, plus a second,
+    spurious host-named folder containing a raw XrdHTTP directory-listing
+    HTML page mis-saved as if it were a real file — not two legitimate
+    copies needing to be merged/deduped, a single bogus artifact from the
+    walk logic. fsspec's other_paths()/common_prefix() (fsspec/utils.py)
+    can't find one clean shared prefix across a tree split across two
+    hosts, and falls back to keeping the full resolved URL — host, port,
+    namespace path, all of it — as literal on-disk folder names for
+    whichever branch diverged.
+
+    This sidesteps that entirely rather than cleaning up after it: never
+    calls fs.get(..., recursive=True) on a directory at all. Enumerates the
+    real files with _walk_remote_files above, then downloads each one
+    individually via fs.get_file() with an explicit destination path this
+    function computes itself (dataset-relative, under storage_location) —
+    no recursive multi-file path-construction logic ever runs, so there's
+    nothing for it to get wrong. Confirmed single-file fs.get() calls (not
+    directories) are unaffected by this bug and are left exactly as they
+    were — see download_one_file below.
+
+    Strictly sequential — a plain loop, no asyncio.gather/thread pool —
+    matching the one-call-in-flight-at-a-time shape this whole download
+    path already had for its single fs.get() call, and the same "never
+    concurrent" principle scripts/indexing_worker.py's walk() uses for its
+    own fs.ls() calls. Sidesteps any question of how much concurrent load
+    is safe against the federation rather than needing a tuned cap.
+    """
+    dest_root = os.path.join(storage_location, os.path.basename(path))
+    os.makedirs(dest_root, exist_ok=True)
+    for remote_path in _walk_remote_files(fs, path):
+        rel = remote_path[len(path):].lstrip("/")
+        local_path = os.path.join(dest_root, rel)
+        os.makedirs(os.path.dirname(local_path), exist_ok=True)
+        logger.info(
+            "Directory download for %s: writing %s -> %s (explicit destination,"
+            " bypassing fs.get()'s own recursive path construction — see"
+            " _download_directory's docstring for why)",
+            path, remote_path, local_path,
+        )
+        fs.get_file(_encode_path_segment(remote_path), local_path)
+
+
 def download_one_file(filepath: str, storage_location: str) -> None:
     # The actual transfer mechanism (fsspec/pelicanfs streaming 5MB chunks
     # straight to disk) is unchanged and correct. What used to be wrong was
@@ -214,7 +289,18 @@ def download_one_file(filepath: str, storage_location: str) -> None:
     path = filepath.rstrip("/")
     fs = _resolve_filesystem(path)
     try:
-        fs.get(_encode_path_segment(path), storage_location, recursive=True)
+        # isdir() only swallows OSError (fsspec/spec.py) — a genuine
+        # not-found on `path` falls through to the plain fs.get() branch
+        # below and surfaces its own correctly-classified not-found error
+        # exactly as before this change; any other kind of failure (auth,
+        # connection, ...) propagates straight out of isdir() into this
+        # same except block, same as it always would have.
+        if fs.isdir(_encode_path_segment(path)):
+            _download_directory(fs, path, storage_location)
+        else:
+            # Confirmed unaffected by the directory-walk bug above — left
+            # exactly as it was.
+            fs.get(_encode_path_segment(path), storage_location, recursive=True)
     except Exception as e:
         if _is_auth_required(e):
             raise DownloadAuthRequiredError(path) from None
