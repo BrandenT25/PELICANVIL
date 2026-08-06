@@ -19,7 +19,10 @@ it's already running inside an allocated job — it never calls sbatch for
 its OWN first invocation, only to queue the next cycle.
 """
 import asyncio
+import faulthandler
 import logging
+import os
+import signal
 import subprocess
 import sys
 import time
@@ -60,6 +63,50 @@ from api.core.pelican_auth import log_unexpected_pelican_error
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("pelican-ui.indexing-worker")
+
+# RUNBOOK — if the worker looks stalled (admin panel/log not moving for
+# 10+ minutes) and you're about to cancel it: first run, from any Anvil
+# login node, `scancel --signal=USR1 <jobid>` (find <jobid> via `squeue -u
+# $USER`) — Slurm delivers the signal to whichever compute node the job
+# actually landed on, no need to find/SSH there yourself. That dumps every
+# thread's current stack to indexing_worker_stackdump_<pid>.txt next to the
+# job's own log file (see _STACKDUMP_PATH below), showing exactly which
+# call it's stuck in. *Then* cancel it if you still need to — this way the
+# evidence survives the cancel instead of being destroyed by it, which is
+# what happened on 2026-08-06 (job 19689186: ~60 minutes of silence, then
+# cancelled, with no way to tell afterward where it had actually been
+# stuck). This costs nothing if the worker is healthy — it's a signal
+# handler that sits idle until triggered.
+_STACKDUMP_PATH = os.path.join(os.path.dirname(DB_PATH), f"indexing_worker_stackdump_{os.getpid()}.txt")
+_stackdump_file = None  # kept referenced so it isn't garbage-collected/closed for the registration's lifetime
+
+
+def _register_stackdump_handler() -> None:
+    """SIGUSR1 -> full thread-stack dump via the stdlib faulthandler module —
+    zero overhead until triggered (a bare signal registration, no polling,
+    no background thread), no external tool or install required. Preferred
+    over py-spy (confirmed installable/usable on Anvil via `pip install
+    py-spy` in a scratch venv, and ptrace_scope=0 here means it *can* attach
+    same-user — both checked 2026-08-06) because py-spy still requires
+    finding which compute node the job landed on and getting a shell there
+    before you can attach; faulthandler's SIGUSR1 is reachable from any
+    login node via plain `scancel --signal=USR1 <jobid>`, using tooling
+    Branden already uses to manage this job. See the RUNBOOK comment above.
+
+    Guarded the same way as api/core/indexing_queue.py's fcntl import:
+    SIGUSR1 doesn't exist on Windows, and this function's only ever
+    meaningfully called under Slurm/Linux, but the guard keeps this file
+    importable if that ever changes."""
+    global _stackdump_file
+    try:
+        sigusr1 = signal.SIGUSR1
+    except AttributeError:
+        logger.warning("SIGUSR1 not available on this platform — stack-dump-on-signal not registered")
+        return
+    _stackdump_file = open(_STACKDUMP_PATH, "a", encoding="utf-8")
+    faulthandler.register(sigusr1, file=_stackdump_file, all_threads=True, chain=False)
+    logger.info("Stack-dump-on-SIGUSR1 registered — 'scancel --signal=USR1 <jobid>' dumps to %s", _STACKDUMP_PATH)
+
 
 IDLE_POLL_SECONDS = 5
 
@@ -325,6 +372,17 @@ def _ensure_unavailable_column(con: sqlite3.Connection, table: str) -> None:
 
 
 def _count_staged(dataset_id: int) -> int:
+    # sqlite3.connect()'s default busy-timeout (5s) only bounds waiting on
+    # another *SQLite* connection's lock — it does nothing for a raw GPFS-
+    # level I/O stall on open()/read() against the shared DB file itself,
+    # which would just block here with no exception and no indication of
+    # where the process is stuck. Same "log loudly if it's ever slow" fix as
+    # api/core/indexing_queue.py's _log_if_slow, applied here since this is
+    # the other blocking call in the exact code path implicated in the
+    # 2026-08-06 ~60-minute silent stall (this call runs immediately before
+    # mark_failed's own queue-file write, in the same failure-handling
+    # block).
+    start = time.monotonic()
     con = sqlite3.connect(DB_PATH)
     try:
         con.execute(_STAGING_TABLE_SQL)
@@ -335,6 +393,14 @@ def _count_staged(dataset_id: int) -> int:
         return row[0]
     finally:
         con.close()
+        elapsed = time.monotonic() - start
+        if elapsed >= 5.0:
+            logger.warning(
+                "_count_staged(dataset_id=%s) took %.1fs — unusually slow, possible DB/filesystem"
+                " contention", dataset_id, elapsed,
+            )
+        else:
+            logger.debug("_count_staged(dataset_id=%s) took %.3fs", dataset_id, elapsed)
 
 
 def _index_dataset(entry: dict) -> int:
@@ -823,6 +889,7 @@ def _resubmit_self() -> None:
 
 
 def main() -> None:
+    _register_stackdump_handler()
     recover_interrupted()
     deadline = time.monotonic() + WALLTIME_HOURS * 3600 - RENEWAL_MARGIN_MINUTES * 60
     logger.info("Indexing worker started, renewal margin %d min", RENEWAL_MARGIN_MINUTES)

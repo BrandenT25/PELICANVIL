@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,16 +19,69 @@ try:
 except ImportError:
     fcntl = None
 
-_EMPTY_STATE = {"queue": [], "current": None, "history": {}}
+logger = logging.getLogger("pelican-ui.indexing_queue")
+
+# Anything under this is routine GPFS/lock jitter, not evidence of
+# contention — update_progress() takes the _with_state path once per folder
+# on a deep walk (hundreds of thousands of times on GOES-scale datasets), so
+# the threshold has to comfortably clear normal noise or every healthy run
+# would spam warnings. 5s is far above anything seen in healthy operation but
+# well below the tens-of-minutes-to-an-hour stall the 2026-08-06 incident
+# showed (worker silent for ~60 minutes with no indication of where it was
+# stuck) — chosen so a *building* stall gets flagged early in the normal log
+# stream, without needing DEBUG turned on ahead of time.
+_SLOW_CALL_THRESHOLD_SECONDS = 5.0
+
+
+def _log_if_slow(label: str, elapsed: float) -> None:
+    """WARNING (always emitted, regardless of configured log level) the
+    moment a single call crosses _SLOW_CALL_THRESHOLD_SECONDS; DEBUG
+    otherwise — cheap and filtered out by default at normal log levels,
+    since logger.debug's %-style args are never formatted unless DEBUG is
+    actually enabled. The point: if a future stall happens, the log should
+    show exactly which specific call was entered but never returned from,
+    not just silence for an hour like 2026-08-06."""
+    if elapsed >= _SLOW_CALL_THRESHOLD_SECONDS:
+        logger.warning("%s took %.1fs — unusually slow, possible contention/stall", label, elapsed)
+    else:
+        logger.debug("%s took %.3fs", label, elapsed)
+
+
+def _empty_state() -> dict:
+    # A function, not a module-level dict constant that callers `dict(...)`-
+    # copy: `dict(x)` is only a *shallow* copy, so every "fresh empty state"
+    # would otherwise share the exact same `queue` list / `history` dict
+    # objects by reference. The very first mutator to append/assign into
+    # either of those (e.g. enqueue_indexing_request's `state["queue"].append`)
+    # would then be mutating that shared object in place, permanently
+    # poisoning every subsequent "fresh" empty state for the rest of the
+    # process's life — including the corruption-recovery fallback below,
+    # which would start silently resurrecting stale ghost entries instead of
+    # actually being empty. Found via testing this file's corruption path
+    # (2026-08-06): a prior enqueue's entry reappeared after simulating a
+    # corrupt read, traced to exactly this.
+    return {"queue": [], "current": None, "history": {}}
+
+# Separate from INDEXING_QUEUE_PATH itself — see _with_state's docstring for
+# why the lock has to live on a path whose identity never changes, distinct
+# from the data file _atomic_write below swaps out from under it.
+_LOCK_PATH = INDEXING_QUEUE_PATH + ".lock"
 
 
 def _parse(raw: str) -> dict:
+    """Raises json.JSONDecodeError on unparseable non-empty content —
+    callers must handle that loudly (see _safe_parse), not silently. This
+    used to swallow a bad parse into a silent _empty_state() here, which
+    was the confirmed root cause of the 2026-08-06 incident: Slurm SIGTERM'd
+    the worker (job 19689186) mid-write, right after it logged "Partial
+    progress preserved for dataset_id=1" and immediately before the
+    mark_failed() write that would have persisted that. The successor job's
+    very first read silently adopted a pristine empty state, discarding
+    every dataset's real history with no trace or log line. A non-empty file
+    that fails to parse is corruption, not "never written yet."""
     if not raw.strip():
-        return dict(_EMPTY_STATE)
-    try:
-        state = json.loads(raw)
-    except json.JSONDecodeError:
-        return dict(_EMPTY_STATE)
+        return _empty_state()
+    state = json.loads(raw)
     state.setdefault("queue", [])
     state.setdefault("current", None)
     history = state.get("history")
@@ -50,49 +105,115 @@ def _parse(raw: str) -> dict:
     return state
 
 
+def _recover_from_corruption(raw: str) -> dict:
+    """Called when _parse can't make sense of on-disk content that isn't
+    just empty. Backs up the unparseable bytes next to the real file
+    (timestamped, never overwritten) so a human can inspect/hand-recover it,
+    and logs loudly — replacing the previous silent discard that turned one
+    interrupted write into an invisible full data-loss incident. There's no
+    safe way to auto-recover a truncated/torn JSON write, so this still
+    falls back to an empty state; the point is making that loss loud and
+    recoverable-from-backup instead of silent."""
+    backup_path = f"{INDEXING_QUEUE_PATH}.corrupt-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}"
+    try:
+        with open(backup_path, "w", encoding="utf-8") as bf:
+            bf.write(raw)
+    except OSError:
+        logger.exception("Also failed to back up the corrupt queue file to %s", backup_path)
+    logger.error(
+        "Indexing queue file at %s is corrupt/unparseable (%d bytes) — backed up to %s and"
+        " resetting to an empty state. This loses any queue/current/history data that hadn't"
+        " been re-confirmed since; inspect the backup to recover anything salvageable.",
+        INDEXING_QUEUE_PATH, len(raw), backup_path,
+    )
+    return _empty_state()
+
+
+def _safe_parse(raw: str) -> dict:
+    try:
+        return _parse(raw)
+    except json.JSONDecodeError:
+        return _recover_from_corruption(raw)
+
+
 def _read_state() -> dict:
     path = Path(INDEXING_QUEUE_PATH)
     if not path.exists():
-        return dict(_EMPTY_STATE)
+        return _empty_state()
+    read_start = time.monotonic()
     with open(path, "r", encoding="utf-8") as fh:
-        if fcntl:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
-        try:
-            return _parse(fh.read())
-        finally:
-            if fcntl:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        raw = fh.read()
+    _log_if_slow("Queue file read", time.monotonic() - read_start)
+    # No lock needed here any more: _atomic_write below guarantees any
+    # completed write is atomically visible as a whole (os.replace), so a
+    # plain read is never able to observe a partial/torn write the way the
+    # old in-place truncate()+write() allowed.
+    return _safe_parse(raw)
+
+
+def _atomic_write(path: Path, state: dict) -> None:
+    """Writes to a same-directory temp file and os.replace()s it into place,
+    replacing the previous in-place truncate()+write(). That in-place
+    approach left a truncated/invalid file on disk for any reader unlucky
+    enough to hit the window between truncate() and the write completing —
+    exactly what a Slurm SIGTERM mid-write produced on 2026-08-06.
+    os.replace() within the same filesystem is atomic: any reader sees
+    either the complete old file or the complete new one, never a partial
+    write, even if this process is killed at any point up to (and
+    including) the replace() call itself. If it's killed before that, the
+    orphaned temp file is simply never linked in — harmless, the real path
+    is untouched."""
+    write_start = time.monotonic()
+    tmp_path = path.with_name(f"{path.name}.tmp-{os.getpid()}-{time.monotonic_ns()}")
+    with open(tmp_path, "w", encoding="utf-8") as fh:
+        json.dump(state, fh, indent=2)
+        fh.write("\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp_path, path)
+    _log_if_slow("Queue file atomic write", time.monotonic() - write_start)
 
 
 def _with_state(mutator):
-    """Opens INDEXING_QUEUE_PATH, takes an exclusive advisory lock for the
-    duration, hands the current state to `mutator` (which returns
-    (new_state, return_value)), writes the result back, and returns
+    """Takes an exclusive advisory lock on a dedicated lock file (_LOCK_PATH,
+    not INDEXING_QUEUE_PATH itself) for the duration, reads the current
+    state, hands it to `mutator` (which returns (new_state, return_value)),
+    atomically writes the result back (see _atomic_write), and returns
     return_value. The one place read-modify-write happens, so every mutating
     function below — including concurrent enqueues from different PUN
     processes and the single worker's own claim/update/finish calls — gets
-    the same locking guarantee for free instead of re-implementing it."""
+    the same locking guarantee for free instead of re-implementing it.
+
+    The lock lives on a separate, never-replaced file rather than
+    INDEXING_QUEUE_PATH itself: flock() locks are tied to the specific inode
+    a file descriptor was opened against, not the path. Once _atomic_write
+    starts os.replace()-ing new inodes onto INDEXING_QUEUE_PATH, a lock
+    taken by opening that path directly would silently stop protecting
+    anything the moment another writer's replace() swaps the inode out from
+    under it. A lock file whose identity never changes sidesteps that
+    entirely."""
     path = Path(INDEXING_QUEUE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # "a+" creates the file if missing without truncating an existing one;
-    # both read and write happen through this same handle while locked.
-    with open(path, "a+", encoding="utf-8") as fh:
+    with open(_LOCK_PATH, "a+", encoding="utf-8") as lock_fh:
         if fcntl:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            # fcntl.flock(LOCK_EX) blocks indefinitely by default — no
+            # timeout, no LOCK_NB here — so if another holder never releases
+            # it (a peer stuck on a GPFS-level stall of its own, say), this
+            # call can hang forever with zero indication of where the
+            # process actually is. This is the single most likely place the
+            # 2026-08-06 ~60-minute silent stall was sitting; log it loudly
+            # if it ever takes more than a few seconds again.
+            lock_wait_start = time.monotonic()
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            _log_if_slow("Queue file lock acquisition", time.monotonic() - lock_wait_start)
         try:
-            fh.seek(0)
-            state = _parse(fh.read())
+            state = _read_state()
             new_state, result = mutator(state)
-            fh.seek(0)
-            fh.truncate()
-            json.dump(new_state, fh, indent=2)
-            fh.write("\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+            _atomic_write(path, new_state)
             return result
         finally:
             if fcntl:
-                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
 
 
 def enqueue_indexing_request(dataset_id: int, path: str, requested_by: str) -> None:
@@ -206,7 +327,7 @@ def _finish_current(dataset_id: int, status: str, error_message: str | None, fol
         current["error_category"] = error_category
         if folders_done is not None:
             current["folders_done"] = folders_done
-        # Keyed by dataset_id (see _EMPTY_STATE/_parse) — the *last* result
+        # Keyed by dataset_id (see _empty_state/_parse) — the *last* result
         # for this specific dataset, replacing any prior one. Deliberately
         # not a capped shared list any more: that design let an unrelated
         # dataset's finish event evict this dataset's own last-known status,
