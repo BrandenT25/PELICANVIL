@@ -201,6 +201,36 @@ UNCLASSIFIED_RETRY_BACKOFF_SECONDS = 10
 # from real trip-outcome data once this is live.
 CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 5
 
+# Root-dataset circuit breaker (2026-08-06 investigation): the breaker above
+# only ever gets a chance to increment for folders *inside* an already-
+# started walk — walk()'s "if path == entry['path']: raise" deliberately
+# re-raises a root-listing failure immediately (a root that can't be listed
+# has no partial walk worth continuing), before ever reaching that counter.
+# That's correct for what it's for, but it means a systemic origin/Director
+# outage — where *every* dataset's very first listing call fails — never
+# trips the folder-level breaker at all: each dataset still pays the full
+# CONNECTION_RETRY_BACKOFFS cost (~90-110s) before moving on to the next,
+# one after another, for as long as the outage lasts. Real evidence,
+# 2026-08-06: noaa-goes19/16/17 each failed exactly this way, back to back,
+# with zero "Circuit breaker: N/5..." log lines between them.
+#
+# ROOT_CIRCUIT_BREAKER_CONSECUTIVE_FAILURES tracks consecutive *whole-
+# dataset* root-listing failures instead — module-level, spanning dataset
+# boundaries like PROACTIVE_RESET_CALLS/CIRCUIT_BREAKER_CONSECUTIVE_FAILURES
+# above. Once tripped, _retry_connection_class swaps its normal multi-
+# attempt backoff schedule for root-path calls down to a single short probe
+# (ROOT_CIRCUIT_BREAKER_PROBE_BACKOFF) — still one real request against the
+# origin, never zero, so a recovered origin is still noticed promptly, just
+# without paying the full retry loop on every dataset while it's already
+# confirmed down. Resets to 0 on any successful listing anywhere (root or
+# not — see walk()'s handling), same "any sign of life resets it" rule as
+# the folder-level breaker. Deliberately a smaller count than the folder
+# breaker (3, not 5): each trip here costs a full dataset's worth of retry
+# time, not one folder's, so less evidence is needed before switching to
+# the cheaper probe.
+ROOT_CIRCUIT_BREAKER_CONSECUTIVE_FAILURES = 3
+ROOT_CIRCUIT_BREAKER_PROBE_BACKOFF = [10]
+
 
 class _ConnectionClassExhausted(Exception):
     """Raised by _retry_connection_class once its full backoff schedule is
@@ -257,6 +287,11 @@ class IndexingCancelled(Exception):
 # PROACTIVE_RESET_CALLS' comment on why this has to span dataset
 # boundaries).
 _ls_call_count = 0
+
+# Consecutive whole-dataset root-listing failures — see
+# ROOT_CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' module-level comment. Also
+# module-level/cross-dataset for the same reason as _ls_call_count above.
+_consecutive_root_failures = 0
 
 
 _STAGING_BATCH_SIZE = 200
@@ -384,15 +419,31 @@ def _index_dataset(entry: dict) -> int:
         singleton before every attempt (existing behavior, kept) since
         these are specifically session/connection-pressure failures a
         fresh instance plausibly helps with.
+
+        Root-listing calls (path == entry["path"]) swap down to
+        ROOT_CIRCUIT_BREAKER_PROBE_BACKOFF once the root breaker is already
+        tripped — see ROOT_CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' module-level
+        comment. Non-root calls always use the full schedule; a subfolder
+        failure mid-walk is exactly the case the existing folder-level
+        breaker already handles.
         """
         nonlocal fs
         global _ls_call_count
+        is_root = path == entry["path"]
+        root_breaker_active = is_root and _consecutive_root_failures >= ROOT_CIRCUIT_BREAKER_CONSECUTIVE_FAILURES
+        schedule = ROOT_CIRCUIT_BREAKER_PROBE_BACKOFF if root_breaker_active else CONNECTION_RETRY_BACKOFFS
+        if root_breaker_active:
+            logger.warning(
+                "Root circuit breaker active for dataset_id=%s (%d consecutive dataset root"
+                " failures) — probing with a single short retry instead of the full schedule",
+                dataset_id, _consecutive_root_failures,
+            )
         exc = first_exc
-        for attempt, backoff in enumerate(CONNECTION_RETRY_BACKOFFS, start=1):
+        for attempt, backoff in enumerate(schedule, start=1):
             logger.warning(
                 "Connection-class retry %d/%d for dataset_id=%s: %s (%d calls on this instance)"
                 " — resetting, waiting %ds, then retrying %r",
-                attempt, len(CONNECTION_RETRY_BACKOFFS), dataset_id, type(exc).__name__,
+                attempt, len(schedule), dataset_id, type(exc).__name__,
                 _ls_call_count, backoff, path,
             )
             reset_default_filesystem()
@@ -424,7 +475,7 @@ def _index_dataset(entry: dict) -> int:
                 exc = e
         logger.error(
             "Connection-class retries exhausted for dataset_id=%s after %d attempt(s): %s",
-            dataset_id, len(CONNECTION_RETRY_BACKOFFS) + 1, type(exc).__name__,
+            dataset_id, len(schedule) + 1, type(exc).__name__,
         )
         try:
             _reraise_cancelled_as_exception(exc)
@@ -539,6 +590,7 @@ def _index_dataset(entry: dict) -> int:
 
     def walk(path: str) -> int:
         nonlocal folders_visited, consecutive_connection_failures
+        global _consecutive_root_failures
         cached = staged_size(path)
         if cached is not None:
             folders_visited += 1
@@ -551,8 +603,12 @@ def _index_dataset(entry: dict) -> int:
             # A successful listing is the strongest possible signal the
             # origin/Director is currently answering normally — see
             # CIRCUIT_BREAKER_CONSECUTIVE_FAILURES' comment on why this
-            # resets the streak rather than just decaying it.
+            # resets the streak rather than just decaying it. Also resets
+            # the root breaker's streak (ROOT_CIRCUIT_BREAKER_CONSECUTIVE_
+            # FAILURES) — any successful listing anywhere, not just at the
+            # root, is equally strong evidence the origin isn't down.
             consecutive_connection_failures = 0
+            _consecutive_root_failures = 0
         except Exception as e:
             # list_path already ran this failure through the full retry
             # treatment its classification calls for (the full
@@ -604,6 +660,22 @@ def _index_dataset(entry: dict) -> int:
             # behavior for that case unchanged — mark_failed at the
             # per-dataset level, exactly as before this task.
             if path == entry["path"]:
+                # Root circuit breaker (see ROOT_CIRCUIT_BREAKER_CONSECUTIVE_
+                # FAILURES' module-level comment): only a
+                # _ConnectionClassExhausted at the root counts — same
+                # confirmed-origin-trouble reasoning as the folder-level
+                # breaker below, just tracked across dataset boundaries
+                # instead of within one dataset's walk, since a root
+                # failure never gets far enough into this function to reach
+                # that one.
+                if isinstance(e, _ConnectionClassExhausted):
+                    _consecutive_root_failures += 1
+                    logger.warning(
+                        "Root circuit breaker: %d/%d consecutive dataset root-listing"
+                        " failures (dataset_id=%s)",
+                        _consecutive_root_failures, ROOT_CIRCUIT_BREAKER_CONSECUTIVE_FAILURES,
+                        dataset_id,
+                    )
                 raise
 
             # Circuit breaker (see CIRCUIT_BREAKER_CONSECUTIVE_FAILURES'

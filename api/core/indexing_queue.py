@@ -17,8 +17,7 @@ try:
 except ImportError:
     fcntl = None
 
-_MAX_HISTORY = 20
-_EMPTY_STATE = {"queue": [], "current": None, "history": []}
+_EMPTY_STATE = {"queue": [], "current": None, "history": {}}
 
 
 def _parse(raw: str) -> dict:
@@ -30,7 +29,24 @@ def _parse(raw: str) -> dict:
         return dict(_EMPTY_STATE)
     state.setdefault("queue", [])
     state.setdefault("current", None)
-    state.setdefault("history", [])
+    history = state.get("history")
+    if isinstance(history, list):
+        # Migrating a pre-2026-08-06 queue file: history used to be a single
+        # shared list capped at the last 20 finish events *across every
+        # dataset*, which meant an old, real "complete" record for one
+        # dataset silently disappeared the moment 20 other datasets (any
+        # dataset, any status) finished after it — reported and confirmed
+        # against real production evidence, see this file's per-dataset dict
+        # below for the fix. Rebuilding a dict from the old list keeps
+        # whatever's still there instead of discarding it outright: iterate
+        # oldest-to-newest (the list itself is newest-first, see
+        # _finish_current's insert(0, ...)) so each dataset ends up mapped to
+        # its most recent surviving entry.
+        rebuilt: dict[str, dict] = {}
+        for entry in reversed(history):
+            rebuilt[str(entry["dataset_id"])] = entry
+        history = rebuilt
+    state["history"] = history if isinstance(history, dict) else {}
     return state
 
 
@@ -190,8 +206,13 @@ def _finish_current(dataset_id: int, status: str, error_message: str | None, fol
         current["error_category"] = error_category
         if folders_done is not None:
             current["folders_done"] = folders_done
-        state["history"].insert(0, current)
-        state["history"] = state["history"][:_MAX_HISTORY]
+        # Keyed by dataset_id (see _EMPTY_STATE/_parse) — the *last* result
+        # for this specific dataset, replacing any prior one. Deliberately
+        # not a capped shared list any more: that design let an unrelated
+        # dataset's finish event evict this dataset's own last-known status,
+        # which is exactly the "successful index reverts to Not indexed"
+        # regression this replaced.
+        state["history"][str(dataset_id)] = current
         state["current"] = None
         return state, None
 
@@ -248,8 +269,7 @@ def recover_interrupted() -> None:
                 "Worker restarted before this job finished; treat as failed and re-queue if still needed."
             )
             current["error_category"] = "worker_restarted"
-            state["history"].insert(0, current)
-            state["history"] = state["history"][:_MAX_HISTORY]
+            state["history"][str(current["dataset_id"])] = current
             state["current"] = None
         return state, None
 
@@ -274,14 +294,14 @@ def get_queue_status(dataset_id: int) -> dict:
         if entry["dataset_id"] == dataset_id:
             return {"status": "queued", "requested_at": entry.get("requested_at")}
 
-    for entry in state["history"]:
-        if entry["dataset_id"] == dataset_id:
-            return {
-                "status": entry["status"],
-                "finished_at": entry.get("finished_at"),
-                "error_message": entry.get("error_message"),
-                "error_category": entry.get("error_category"),
-                "folders_done": entry.get("folders_done"),
-            }
+    entry = state["history"].get(str(dataset_id))
+    if entry is not None:
+        return {
+            "status": entry["status"],
+            "finished_at": entry.get("finished_at"),
+            "error_message": entry.get("error_message"),
+            "error_category": entry.get("error_category"),
+            "folders_done": entry.get("folders_done"),
+        }
 
     return {"status": "never_indexed"}
