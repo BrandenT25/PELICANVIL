@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request, HTTPException
+import logging
 import os
 from datetime import date
 from fastapi.responses import HTMLResponse
@@ -12,12 +13,26 @@ from api.routes.downloads import downloadsRouter
 from api.routes.token_auth import tokenAuthRouter
 from api.routes.indexing import indexingRouter
 from api.routes.blind_mode import blindModeRouter
+from scripts.migrate_category_icons import migrate_category_icons
 
 from api.auth import is_authorized
 from api.core.blind_mode import is_blind_mode
 
 USER = os.environ.get("USER")
 
+# Backfills the DB-backed category icon columns from each category's legacy
+# static-file icon (see scripts/migrate_category_icons.py's own docstring)
+# so existing categories keep their real icons with no manual admin
+# action. Runs once per process start (every PUN launch, not just a true
+# one-time deploy step — this is a multi-process-per-user deployment with
+# no single global "run once" hook) — safe because it's idempotent, same
+# "lazy migration on every start" shape as downloads.py's _init_db().
+# Best-effort: a hiccup here shouldn't prevent the app from serving,
+# mirroring api/routes/database.py's own best-effort auto-indexing trigger.
+try:
+    migrate_category_icons()
+except Exception:
+    logging.getLogger("pelican-ui.startup").exception("Category icon migration failed at startup")
 
 app = FastAPI()
 app.include_router(datasetRouter)

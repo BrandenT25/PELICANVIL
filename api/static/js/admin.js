@@ -4,6 +4,20 @@
 // would leak intervals still firing against now-detached card elements.
 let activeIndexPollHandles = []
 
+// Mirrors api/core/category_icons.py's MAX_ICON_BYTES — shown in the
+// upload field's label so the size limit isn't a surprise only discovered
+// after a failed upload. Kept as a literal (not fetched from the backend)
+// since this project has no shared frontend/backend config channel and a
+// KB label is cosmetic, not a real client-side enforcement point — the
+// backend route is still the actual source of truth/validation.
+const MAX_ICON_KB = 512
+
+// Same fallback glyph as api/static/js/categories.js's
+// CATEGORY_ICON_FALLBACK (duplicated rather than shared — see that file's
+// own comment on why) — shown for editCategory's existing-icon preview
+// when a category has no uploaded icon yet.
+const CATEGORY_ICON_FALLBACK = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='3' y='3' width='18' height='18' rx='3'/%3E%3Ccircle cx='8.5' cy='8.5' r='1.5'/%3E%3Cpath d='M21 15l-5-5L5 21'/%3E%3C/svg%3E"
+
 async function displayDataset(toggle){
 
     if(toggle === true){
@@ -307,8 +321,9 @@ function editCategory(originalCategory){
                 </div>
 
                 <div class="form-field">
-                    <label for="image-path">Image path</label>
-                    <input type="text" id="image-path">
+                    <label for="category-icon">Icon (PNG, JPEG, WEBP, or SVG — max ${MAX_ICON_KB} KB)</label>
+                    <img id="category-icon-preview" class="category-icon-preview" alt="Current icon" src="${window.ROOT_PATH}/categories/${originalCategory.url}/icon" onerror="this.onerror=null;this.src=CATEGORY_ICON_FALLBACK;">
+                    <input type="file" id="category-icon" accept="image/png,image/jpeg,image/webp,image/svg+xml">
                 </div>
 
             </div>
@@ -321,7 +336,13 @@ function editCategory(originalCategory){
     document.querySelector('#category-name').value = originalCategory.name
     document.querySelector('#category-description').value = originalCategory.description
     document.querySelector('#url-slug').value = originalCategory.url
-    document.querySelector('#image-path').value = originalCategory.icon
+
+    const iconInput = document.querySelector('#category-icon')
+    const iconPreview = document.querySelector('#category-icon-preview')
+    iconInput.addEventListener("change", () => {
+        const file = iconInput.files[0]
+        if (file) iconPreview.src = URL.createObjectURL(file)
+    })
 
     const closeBtn = document.querySelector(".add-dataset-close-btn")
     const submitButton = document.querySelector(".submit-btn")
@@ -331,12 +352,26 @@ function editCategory(originalCategory){
             name: document.querySelector('#category-name').value,
             description: document.querySelector('#category-description').value,
             url: document.querySelector('#url-slug').value,
-            icon: document.querySelector('#image-path').value
         }
         const result = await submitCategoryChange(category, originalCategory.url)
         if (!result.ok) {
             showToast(result.error, "error")
             return
+        }
+        // Icon upload is a separate call (see uploadCategoryIcon) — only
+        // fired if the admin actually picked a new file; a category-only
+        // edit shouldn't touch the existing icon at all. Failure here
+        // doesn't roll back the category save above (already committed) —
+        // reported as its own toast so it's clear which half didn't land.
+        const file = iconInput.files[0]
+        if (file) {
+            const iconResult = await uploadCategoryIcon(category.url, file)
+            if (!iconResult.ok) {
+                showToast(`Category saved, but icon upload failed: ${iconResult.error}`, "error")
+                toggleOverlay(false)
+                displayCategory(true)
+                return
+            }
         }
         showToast(`Category "${category.name}" updated.`, "success")
         toggleOverlay(false)
@@ -563,8 +598,8 @@ function addCategory(){
                 </div>
 
                 <div class="form-field">
-                    <label for="image-path">Image Path</label>
-                    <input type="text" id="image-path">
+                    <label for="category-icon">Icon (PNG, JPEG, WEBP, or SVG — max ${MAX_ICON_KB} KB)</label>
+                    <input type="file" id="category-icon" accept="image/png,image/jpeg,image/webp,image/svg+xml">
                 </div>
 
             </div>
@@ -573,20 +608,32 @@ function addCategory(){
             </div>
         </div>
     `
-    populateCategoryDropdown() 
+    populateCategoryDropdown()
     const closeBtn = document.querySelector(".add-dataset-close-btn")
     const submitButton = document.querySelector(".submit-btn")
+    const iconInput = document.querySelector('#category-icon')
     submitButton.addEventListener("click", async () =>{
         const category = {
         name: document.querySelector('#category-name').value,
         description: document.querySelector('#category-description').value,
         url: document.querySelector('#url-slug').value,
-        icon: document.querySelector('#image-path').value
     }
         const result = await submitCategory(category)
         if (!result.ok) {
             showToast(result.error, "error")
             return
+        }
+        // See editCategory's own comment on why this is a separate call —
+        // same reasoning applies to a brand-new category.
+        const file = iconInput.files[0]
+        if (file) {
+            const iconResult = await uploadCategoryIcon(category.url, file)
+            if (!iconResult.ok) {
+                showToast(`Category added, but icon upload failed: ${iconResult.error}`, "error")
+                toggleOverlay(false)
+                displayCategory(true)
+                return
+            }
         }
         showToast(`Category "${category.name}" added.`, "success")
         toggleOverlay(false)
@@ -813,6 +860,21 @@ async function submitCategory(category){
 async function removeCategory(url){
     return adminRequest(`${window.ROOT_PATH}/admin/remove-category?category_url=${encodeURIComponent(url)}`, {
         method: "POST",
+    })
+}
+
+async function uploadCategoryIcon(url, file){
+    // Raw file body with its own Content-Type, not multipart/form-data —
+    // matches api/routes/database.py's uploadCategoryIcon, which reads the
+    // request body directly rather than requiring the python-multipart
+    // dependency FastAPI's File()/UploadFile() need. Browsers can POST a
+    // File object directly as fetch's body.
+    return adminRequest(`${window.ROOT_PATH}/admin/categories/${encodeURIComponent(url)}/icon`, {
+        method: "POST",
+        headers: {
+            "Content-Type": file.type
+        },
+        body: file,
     })
 }
 

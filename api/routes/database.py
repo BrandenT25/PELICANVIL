@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 import sqlite3, os, json, logging
+from datetime import datetime, timezone
 from api.auth import is_authorized
 from api.core.config import DB_PATH
 from api.core.indexing_queue import enqueue_indexing_request
+from api.core.category_icons import ensure_icon_columns, validate_icon_upload
 
 logger = logging.getLogger("pelican-ui.admin")
 
@@ -23,7 +25,15 @@ class DatasetCreate(BaseModel):
 class CategoryCreate(BaseModel):
     name: str
     url: str
-    icon: str
+    # Legacy static-path convention (e.g. "api/static/img/foo.png"),
+    # superseded by the DB-backed icon_data/icon_content_type columns (see
+    # api/core/category_icons.py) — the admin panel no longer collects this
+    # field at all (replaced by the icon upload control), so it now defaults
+    # to "" rather than being required. Left on the model/column rather than
+    # dropped: harmless, and Phase 3's migration still reads it as the
+    # source-of-truth pointer for which static file belongs to which
+    # category when backfilling icon_data for existing rows.
+    icon: str = ""
     description: str
 
 @dbRouter.post("/admin/add-dataset")
@@ -201,6 +211,47 @@ async def modifyCategory(category_url: str, category: CategoryCreate):
     finally:
         con.close()
     return {"status": "success", "name": category.name}
+
+
+@dbRouter.post("/admin/categories/{category_url}/icon")
+async def uploadCategoryIcon(category_url: str, request: Request):
+    # Reuses the same admin-auth gate as every other category CRUD route
+    # above — no new permission system built for this.
+    if not is_authorized(USER):
+        raise HTTPException(status_code=403, detail="Not Authorized")
+    # Raw request body, not a multipart/form-data upload — this project has
+    # no python-multipart dependency (FastAPI's File()/UploadFile() both
+    # require it), and a raw POST body with the file's own Content-Type
+    # header does the same job with no new dependency: browsers can POST a
+    # File object directly as fetch's body, which sends exactly this shape
+    # (see api/static/js/admin.js's uploadCategoryIcon).
+    content_type = request.headers.get("content-type", "")
+    data = await request.body()
+    try:
+        normalized_type = validate_icon_upload(content_type, data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    con = sqlite3.connect(DB_PATH)
+    try:
+        ensure_icon_columns(con)
+        cur = con.cursor()
+        cur.execute(
+            "UPDATE categories SET icon_data = ?, icon_content_type = ?, icon_updated_at = ? WHERE url = ?",
+            (data, normalized_type, datetime.now(timezone.utc).isoformat(), category_url),
+        )
+        con.commit()
+        if cur.rowcount == 0:
+            raise HTTPException(status_code=404, detail="That category no longer exists.")
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("uploadCategoryIcon failed")
+        raise HTTPException(status_code=500, detail="Upload failed. Check server logs.")
+    finally:
+        con.close()
+    return {"status": "success"}
+
 
 @dbRouter.post("/admin/add-user")
 async def addUser(user: str):

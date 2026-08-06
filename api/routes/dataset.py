@@ -1,8 +1,10 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import Response
 import json, os
 from pathlib import Path
-import sqlite3 
+import sqlite3
 from api.core.config import DB_PATH
+from api.core.category_icons import ensure_icon_columns
 
 ROOTPATH = Path.cwd()
 DATASET_PATH = os.path.join(ROOTPATH, "data", "datasets.json")
@@ -115,9 +117,36 @@ async def serveCategories():
         }
         result.append(row)
     return result
-    
 
 
-
-
+@datasetRouter.get("/categories/{category_url}/icon")
+async def serveCategoryIcon(category_url: str):
+    # Public — same trust level as /retrieve-categories above (category
+    # icons are catalog-wide, not access-controlled data). Reads the DB-
+    # backed icon straight into the HTTP response, not base64-inlined, so
+    # the frontend can reference it with a normal <img src="..."> and get
+    # normal browser caching behavior — see the design conversation's Phase
+    # 1 note on why this beats embedding the bytes into the page payload.
+    con = sqlite3.connect(DB_PATH)
+    try:
+        ensure_icon_columns(con)
+        cur = con.cursor()
+        cur.execute(
+            "SELECT icon_data, icon_content_type FROM categories WHERE url = ?",
+            (category_url,),
+        )
+        row = cur.fetchone()
+    finally:
+        con.close()
+    if row is None or row[0] is None:
+        # No icon uploaded for this category yet (or the category doesn't
+        # exist) — a plain 404, not a placeholder image. The frontend's own
+        # <img onerror> is what shows the generic fallback graphic; keeping
+        # that a frontend concern means every render site (categories.js,
+        # index.html, admin.js's preview) gets the same fallback for free
+        # from the same mechanism instead of this route needing to guess
+        # what a good default image would look like.
+        raise HTTPException(status_code=404, detail="No icon set for this category.")
+    data, content_type = row
+    return Response(content=data, media_type=content_type or "application/octet-stream")
 
