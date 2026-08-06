@@ -115,7 +115,7 @@ async def serveCategories():
             "icon": row["icon"],
             "description": row["description"],
         }
-        result.append(row)
+        result.append(current_row)
     return result
 
 
