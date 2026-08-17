@@ -3,7 +3,7 @@ import sys
 import site
 
 venv_site = os.path.join(
-    os.environ['HOME'], 'ondemand/dev/anvil-pelican-ui/.venv/lib/python3.11/site-packages'
+    os.path.dirname(os.path.abspath(__file__)), '.venv/lib/python3.11/site-packages'
 )
 site.addsitedir(venv_site)
 

@@ -9,6 +9,8 @@ if [ ! -x "$UV_INSTALL_DIR/uv" ]; then
 fi
 export PATH="$UV_INSTALL_DIR:$PATH"
 
+export UV_PYTHON_INSTALL_DIR="$SCRIPT_DIR/../.uv-python"
+
 if [ ! -f "$SCRIPT_DIR/../.venv/bin/activate" ]; then
     (cd "$SCRIPT_DIR/.." && uv sync)
 fi
