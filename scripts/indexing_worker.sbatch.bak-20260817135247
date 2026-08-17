@@ -23,11 +23,10 @@
 
 set -euo pipefail
 
-# Resolved relative to this script's own location, not $HOME — sbatch
-# copies/reads this file from wherever it's submitted, so this always
-# points at the checkout it was actually submitted from, regardless of
-# which account ran `sbatch` (same fix as passenger_wsgi.py's venv_site).
-APP_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
+# Same venv location passenger_wsgi.py uses for the web app itself, so this
+# worker runs against the identical installed dependencies (pelicanfs,
+# aiowebdav2, etc.) rather than risking a second, drifting environment.
+APP_DIR="$HOME/ondemand/dev/pelican-ui"
 VENV_PYTHON="$APP_DIR/.venv/bin/python"
 
 cd "$APP_DIR"
