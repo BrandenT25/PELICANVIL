@@ -55,7 +55,10 @@ async function displayDataset(toggle){
                 <div class="text-wrapper">
                     <span class="datasetName">${dataset["name"]}</span>
                     <span class="datasetDescription">${dataset["path"]}</span>
-                    <span class="index-status-badge"></span>
+                    <div class="index-status-line">
+                        <span class="index-status-badge"></span>
+                        <span class="staged-tag" style="display:none"></span>
+                    </div>
                     <span class="index-status-reason"></span>
                 </div>
                 <div class="modify-wrapper">
@@ -941,11 +944,15 @@ function renderIndexBadge(datasetCard, status){
     // walking it — there's no total folder count known upfront, only a
     // running count of how many have been visited so far (folders_done,
     // already returned by GET /admin/datasets/{id}/index-status). So this
-    // shows real progress ("340 folders scanned") rather than a fabricated
-    // "340/812" or percentage — an honest count, not invented precision.
+    // shows real progress ("340 folders scanned for this run") rather than
+    // a fabricated "340/812" or percentage — an honest count, not invented
+    // precision. "for this run" is explicit because folders_done resets to
+    // 0 on every fresh claim (claim_next_pending) — the cumulative total
+    // across every attempt lives in the separate .staged-tag pill below,
+    // not this number.
     if (status.status === "in_progress" && typeof status.folders_done === "number") {
         const elapsed = formatElapsed(status.started_at)
-        badge.textContent = `${INDEX_STATUS_LABELS.in_progress} ${status.folders_done} folder${status.folders_done === 1 ? "" : "s"} scanned${elapsed ? ` · ${elapsed}` : ""}`
+        badge.textContent = `${INDEX_STATUS_LABELS.in_progress} ${status.folders_done} folder${status.folders_done === 1 ? "" : "s"} scanned for this run${elapsed ? ` · ${elapsed}` : ""}`
     } else {
         badge.textContent = INDEX_STATUS_LABELS[status.status] || status.status
     }
@@ -961,6 +968,35 @@ function renderIndexBadge(datasetCard, status){
             ? status.error_message
             : ""
         reason.style.display = reason.textContent ? "" : "none"
+    }
+    // Separate pill (not folded into the status badge's own text), but kept
+    // on the same visual line via CSS (.index-status-line, a row flexbox in
+    // admin.css) rather than stacked below — the two numbers read as one
+    // fact ("here's where this dataset's indexing stands"), not two.
+    //
+    // staged_count is the cumulative folder-row total in
+    // dataset_folder_sizes_staging across every attempt ever made on this
+    // dataset (crashed/restarted runs included), and it already INCLUDES
+    // this run's own progress — walk() in scripts/indexing_worker.py
+    // increments folders_done for every folder touched this run, whether
+    // newly walked or resumed-from-staging (staged_size() cache hit), and
+    // every newly-walked folder is itself written into that same staging
+    // table as it completes. So staged_count is always >= folders_done; the
+    // badge's own "for this run" wording above is what disambiguates the
+    // two numbers, so this pill just states the cumulative fact plainly.
+    // Shown for queued/in_progress/complete (the statuses get_queue_status()
+    // computes/carries a staged_count for) and only when nonzero — for
+    // complete specifically, staged_count is the finished walk's own final
+    // folders_done, the same total that ended up in dataset_folder_sizes.
+    const stagedTag = datasetCard.querySelector(".staged-tag")
+    if (stagedTag) {
+        if (typeof status.staged_count === "number" && status.staged_count > 0) {
+            stagedTag.textContent = `${status.staged_count.toLocaleString()} folder${status.staged_count === 1 ? "" : "s"} already indexed`
+            stagedTag.style.display = ""
+        } else {
+            stagedTag.textContent = ""
+            stagedTag.style.display = "none"
+        }
     }
     // Cancel only ever makes sense against a dataset that's actually
     // running right now — see this feature's own out-of-scope note (no

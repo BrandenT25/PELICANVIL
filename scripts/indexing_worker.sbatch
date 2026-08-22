@@ -26,7 +26,7 @@ set -euo pipefail
 # Same venv location passenger_wsgi.py uses for the web app itself, so this
 # worker runs against the identical installed dependencies (pelicanfs,
 # aiowebdav2, etc.) rather than risking a second, drifting environment.
-APP_DIR="$HOME/ondemand/dev/pelican-ui"
+APP_DIR="$HOME/ondemand/dev/pelicanvil"
 VENV_PYTHON="$APP_DIR/.venv/bin/python"
 
 cd "$APP_DIR"

@@ -1,11 +1,12 @@
 import json
 import logging
 import os
+import sqlite3
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from api.core.config import INDEXING_QUEUE_PATH
+from api.core.config import DB_PATH, INDEXING_QUEUE_PATH
 
 try:
     # Real advisory locking — always available on the actual Anvil/Linux
@@ -397,6 +398,29 @@ def recover_interrupted() -> None:
     _with_state(mutator)
 
 
+def _staged_folder_count(dataset_id: int) -> int:
+    """Cumulative rows already staged for this dataset across every attempt
+    ever made (crashed/restarted runs included) — distinct from the
+    in-progress entry's `folders_done`, which only reflects the current
+    run. Mirrors api/routes/dataset.py's `_indexed_sizes_by_path` connection
+    pattern: plain try/except sqlite3.OperationalError treats a
+    not-yet-created staging table (fresh deployment, or a dataset that has
+    never been indexed) as zero, not an error."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        try:
+            cur = con.cursor()
+            cur.execute(
+                "SELECT COUNT(*) FROM dataset_folder_sizes_staging WHERE dataset_id = ?",
+                (dataset_id,),
+            )
+            return cur.fetchone()[0]
+        finally:
+            con.close()
+    except sqlite3.OperationalError:
+        return 0
+
+
 def get_queue_status(dataset_id: int) -> dict:
     """Read-only — used by GET /admin/datasets/{id}/index-status. Checked in
     order: currently running, queued, most recent history entry, else this
@@ -409,20 +433,38 @@ def get_queue_status(dataset_id: int) -> dict:
             "status": "in_progress",
             "folders_done": entry.get("folders_done", 0),
             "started_at": entry.get("started_at"),
+            "staged_count": _staged_folder_count(dataset_id),
         }
 
     for entry in state["queue"]:
         if entry["dataset_id"] == dataset_id:
-            return {"status": "queued", "requested_at": entry.get("requested_at")}
+            return {
+                "status": "queued",
+                "requested_at": entry.get("requested_at"),
+                "staged_count": _staged_folder_count(dataset_id),
+            }
 
     entry = state["history"].get(str(dataset_id))
     if entry is not None:
-        return {
+        result = {
             "status": entry["status"],
             "finished_at": entry.get("finished_at"),
             "error_message": entry.get("error_message"),
             "error_category": entry.get("error_category"),
             "folders_done": entry.get("folders_done"),
         }
+        # For "complete" specifically, folders_done is the finished walk's
+        # own final count (mark_complete(dataset_id, folders_visited) in
+        # scripts/indexing_worker.py's main()) — a full, uncrashed run
+        # already covers the whole dataset, so this is the same number
+        # that ended up in dataset_folder_sizes after _finalize_folder_sizes
+        # swept the staging rows over. No separate query needed here, unlike
+        # queued/in_progress above, where staging is the *only* place a
+        # partial/prior-crash count lives. Surfaced under the same
+        # staged_count key so the frontend (admin.js's renderIndexBadge) has
+        # one field to check regardless of status.
+        if entry["status"] == "complete" and isinstance(entry.get("folders_done"), int):
+            result["staged_count"] = entry["folders_done"]
+        return result
 
     return {"status": "never_indexed"}
