@@ -14,20 +14,30 @@
 #SBATCH --job-name=pelican-ui-indexing
 #SBATCH --partition=shared
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks=64
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=4G
+# #SBATCH --mem=4G
 #SBATCH --time=24:00:00
-#SBATCH --account=x-cda090008
+#SBATCH --account=cda090008
 #SBATCH --output=/anvil/projects/x-cda090008/anvil_reu26_pj4/pelican-ui-shared/indexing_worker_%j.log
+#SBATCH --error=/anvil/projects/x-cda090008/anvil_reu26_pj4/pelican-ui-shared/indexing_worker_%j.err
 
 set -euo pipefail
 
-# Same venv location passenger_wsgi.py uses for the web app itself, so this
-# worker runs against the identical installed dependencies (pelicanfs,
-# aiowebdav2, etc.) rather than risking a second, drifting environment.
+# Resolved relative to this script's own location, not $HOME — sbatch
+# copies/reads this file from wherever it's submitted, so this always
+# points at the checkout it was actually submitted from, regardless of
+# which account ran `sbatch`.
+# APP_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/.." &> /dev/null && pwd )"
 APP_DIR="$HOME/ondemand/dev/pelicanvil"
-VENV_PYTHON="$APP_DIR/.venv/bin/python"
+
+CONTAINER_IMAGE="/anvil/projects/x-cda090008/anvil_reu26_pj4/pelican-ui-shared/indexing_worker.sif"
 
 cd "$APP_DIR"
-exec "$VENV_PYTHON" scripts/indexing_worker.py
+# --bind "$APP_DIR":"$APP_DIR": the container must see this checkout at the
+# *same* absolute path it has on the host — indexing_worker.py resolves
+# SBATCH_SCRIPT via Path(__file__).resolve().parent for its own
+# self-resubmission (_resubmit_self calls the host's real `sbatch` on that
+# path), so a path mismatch between host and container would break that.
+exec apptainer exec --bind "$APP_DIR":"$APP_DIR" --pwd "$APP_DIR" "$CONTAINER_IMAGE" \
+    python scripts/indexing_worker.py

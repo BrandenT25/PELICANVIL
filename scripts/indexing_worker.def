@@ -1,0 +1,48 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    pyproject.toml /build/pyproject.toml
+    uv.lock /build/uv.lock
+
+%post
+    set -eux
+    pip install --no-cache-dir uv
+    cd /build
+    # --frozen: install exactly what uv.lock pins, never re-resolve against
+    # PyPI at build time — the whole point of baking this into an image is a
+    # dependency set that's reproducible regardless of which user/session
+    # builds it or what's on PyPI on a given day.
+    uv sync --frozen --no-dev --python /usr/local/bin/python3.11
+    # The venv this container carries its own copy of, independent of any
+    # user's $HOME or any Open OnDemand gateway path — that independence is
+    # the entire reason this container exists (see scripts/indexing_worker.sbatch's
+    # own comment on the .venv/bin/python symlink-rot incident this replaced,
+    # 2026-08-24).
+    mv /build/.venv /opt/pelican-ui-venv
+    rm -rf /build
+
+%environment
+    export PATH=/opt/pelican-ui-venv/bin:$PATH
+
+%runscript
+    exec /opt/pelican-ui-venv/bin/python "$@"
+
+%labels
+    Author pelican-ui
+    Purpose "Runtime for scripts/indexing_worker.py — pinned to pyproject.toml/uv.lock at build time, independent of any per-user venv or Open OnDemand gateway path"
+
+%help
+    Runs the pelican-ui indexing worker's Python environment, built from this
+    repo's pyproject.toml/uv.lock via `uv sync --frozen`.
+
+    Rebuild after any dependency change (pyproject.toml/uv.lock), from the
+    repo root:
+        apptainer build --fakeroot scripts/indexing_worker.sif scripts/indexing_worker.def
+
+    The .sif this produces is meant to be copied/rebuilt into the shared
+    path scripts/indexing_worker.sbatch actually execs from — see that
+    file's own comment for the current shared path.
+
+    Run the worker directly for a quick smoke test:
+        apptainer exec scripts/indexing_worker.sif python scripts/indexing_worker.py --help
