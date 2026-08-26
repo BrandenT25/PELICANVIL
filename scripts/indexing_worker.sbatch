@@ -17,7 +17,7 @@
 #SBATCH --ntasks=64
 #SBATCH --cpus-per-task=1
 # #SBATCH --mem=4G
-#SBATCH --time=24:00:00
+#SBATCH --time=96:00:00
 #SBATCH --account=cda090008
 #SBATCH --output=/anvil/projects/x-cda090008/anvil_reu26_pj4/pelican-ui-shared/indexing_worker_%j.log
 #SBATCH --error=/anvil/projects/x-cda090008/anvil_reu26_pj4/pelican-ui-shared/indexing_worker_%j.err
