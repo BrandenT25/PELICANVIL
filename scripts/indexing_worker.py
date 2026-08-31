@@ -10,20 +10,26 @@ own Slurm job would hit the same "not every user is in the charged
 allocation" problem already solved once for the project-folder picker — so
 this script is submitted manually, once, by one identity, and keeps itself
 alive across Anvil's 96-hour hard walltime cap by resubmitting itself near
-the end of each cycle (see _maybe_resubmit_and_exit below) rather than a
-human re-running it.
+the end of each cycle rather than a human re-running it. Since 2026-08-24
+this process itself runs inside an Apptainer container (see
+scripts/indexing_worker.sbatch) that deliberately carries no Slurm client
+tools — `sbatch` isn't on PATH in there, so this script can't call it
+directly any more. Instead it signals the need to resubmit by exiting with
+RESUBMIT_EXIT_CODE (see main()); the sbatch script itself, which is still
+running on the host waiting for this container to return, is what actually
+calls `sbatch` for the next cycle.
 
 Usage on Anvil: `sbatch scripts/indexing_worker.sbatch` (see that file for
 the #SBATCH resource header) starts the first cycle. This script assumes
-it's already running inside an allocated job — it never calls sbatch for
-its OWN first invocation, only to queue the next cycle.
+it's already running inside an allocated job, and never calls `sbatch`
+itself — it only signals the need for the next cycle via its exit code (see
+RESUBMIT_EXIT_CODE); the sbatch script is what actually resubmits.
 """
 import asyncio
 import faulthandler
 import logging
 import os
 import signal
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -111,10 +117,19 @@ def _register_stackdump_handler() -> None:
 IDLE_POLL_SECONDS = 5
 
 # Comfortably under Anvil's 96-hour hard cap on the shared partition (see
-# scripts/indexing_worker.sbatch's --time). The idle loop costs nothing
-# significant, so there's no pressure to cut this closer — 24h just keeps
-# the self-renewal cadence infrequent. Not a hard constraint; adjust freely.
-WALLTIME_HOURS = 24
+# scripts/indexing_worker.sbatch's --time) — deliberately NOT set equal to
+# that cap. This is a self-imposed cycle length, not meant to match Slurm's
+# hard kill: it needs a real margin below 96h so a dataset walk still
+# in-flight when the deadline hits has room to finish and hand off
+# gracefully (see main()'s deadline check + RESUBMIT_EXIT_CODE) before
+# Slurm force-kills the job instead — a force-kill happens before
+# indexing_worker.py ever gets to run its own exit-code/resubmit logic, so
+# the self-renewal chain silently stops right there (confirmed both by the
+# 2026-08-24 incident and by the 2026-08-28 short-walltime tests). 48h
+# keeps that margin comfortable while halving resubmission frequency
+# relative to the original 24h. Not a hard constraint; adjust freely, but
+# keep real distance from 96h.
+WALLTIME_HOURS = 48
 # How far before the walltime deadline to stop claiming new work and
 # resubmit instead — must be comfortably longer than one indexing run can
 # take (the prompt's own benchmark: ~20-40 min for a 500k-800k file
@@ -122,7 +137,21 @@ WALLTIME_HOURS = 24
 # before Slurm kills this cycle.
 RENEWAL_MARGIN_MINUTES = 60
 
-SBATCH_SCRIPT = Path(__file__).resolve().parent / "indexing_worker.sbatch"
+# Distinct, deliberately unusual exit code meaning "walltime approaching,
+# please resubmit" — sys.exit()s this instead of calling `sbatch` directly
+# (2026-08-24 incident: this script runs inside an Apptainer container with
+# no Slurm client tools on PATH, so a direct subprocess.run(["sbatch", ...])
+# from in here always fails with FileNotFoundError, silently ending the
+# indexing chain the moment a job first hits its walltime deadline — exactly
+# what happened after noaa-goes19 completed on 2026-08-27, stalling the
+# queue with 10 datasets, including a ~2M-folder noaa-goes16, still waiting).
+# scripts/indexing_worker.sbatch runs on the host and is still alive after
+# `apptainer exec` returns — it checks for this specific code and is the one
+# that actually calls `sbatch`, since that binary only exists out there.
+# Chosen from the BSD sysexits.h range (64-78, EX_TEMPFAIL=75) rather than
+# 0-2 or 126-165, which shells/Python/signal handling already give other
+# conventional meanings to.
+RESUBMIT_EXIT_CODE = 75
 
 # Connection-pressure safeguards (2026-08-04 investigation): pelicanfs's own
 # _ls_real creates a brand-new aiohttp.ClientSession per .ls() call and
@@ -341,6 +370,25 @@ _ls_call_count = 0
 _consecutive_root_failures = 0
 
 
+# sqlite3.connect()'s default timeout=5.0 (confirmed empirically, not just
+# from the docs) governs how long a connection retries against another
+# connection's write lock before raising "database is locked" — 5s is far
+# too short here: pelican.db is genuinely multi-writer (this worker plus
+# every PUN process's own admin-CRUD writes via api/routes/database.py),
+# and _finalize_folder_sizes' own single-transaction bulk INSERT SELECT +
+# DELETE can itself legitimately hold the write lock for a long time on a
+# multi-million-row dataset (GOES-scale) over GPFS-backed shared storage.
+# Real incident, 2026-08-31: dataset_id=18 (allencell, 1.4M+ staged rows)
+# hit "database is locked" mid-flush after several already-logged "queue
+# file atomic write took Ns" warnings pointing at general filesystem
+# slowness that morning — a transient stall, not a logic bug, that a
+# too-short busy-timeout turned into a lost claim (1.4M folders' progress
+# preserved via staging, but the dataset had to resume rather than finish
+# cleanly). 30s rides out realistic contention/GPFS slowness while still
+# surfacing a genuinely stuck lock in bounded, loud time rather than
+# hanging silently.
+_SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
 _STAGING_BATCH_SIZE = 200
 _STAGING_TABLE_SQL = """CREATE TABLE IF NOT EXISTS dataset_folder_sizes_staging (
     dataset_id INTEGER NOT NULL,
@@ -383,7 +431,7 @@ def _count_staged(dataset_id: int) -> int:
     # mark_failed's own queue-file write, in the same failure-handling
     # block).
     start = time.monotonic()
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
     try:
         con.execute(_STAGING_TABLE_SQL)
         _ensure_unavailable_column(con, "dataset_folder_sizes_staging")
@@ -437,7 +485,7 @@ def _index_dataset(entry: dict) -> int:
     """
     fs = _resolve_filesystem(entry["path"])
     dataset_id = entry["dataset_id"]
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
     con.execute(_STAGING_TABLE_SQL)
     _ensure_unavailable_column(con, "dataset_folder_sizes_staging")
     folders_visited = 0
@@ -843,7 +891,7 @@ def _finalize_folder_sizes(dataset_id: int) -> None:
     genuinely per-folder data, and the root-path row already *is* the total.
     """
     now = datetime.now(timezone.utc).isoformat()
-    con = sqlite3.connect(DB_PATH)
+    con = sqlite3.connect(DB_PATH, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
     try:
         con.execute(
             """CREATE TABLE IF NOT EXISTS dataset_folder_sizes (
@@ -871,23 +919,6 @@ def _finalize_folder_sizes(dataset_id: int) -> None:
         con.close()
 
 
-def _resubmit_self() -> None:
-    # Matches api/routes/local.py's existing pattern for shelling out to a
-    # Slurm/cluster command (subprocess.run with captured stdout/stderr,
-    # universal_newlines, and a timeout) rather than inventing a new style.
-    try:
-        result = subprocess.run(
-            ["sbatch", str(SBATCH_SCRIPT)],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=30,
-        )
-        if result.returncode != 0:
-            logger.error("sbatch resubmission failed (exit %s): %s", result.returncode, result.stderr.strip())
-        else:
-            logger.info("Resubmitted next worker cycle: %s", result.stdout.strip())
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        logger.exception("Could not run sbatch to resubmit — the indexing chain stops here until resubmitted manually")
-
-
 def main() -> None:
     _register_stackdump_handler()
     recover_interrupted()
@@ -896,9 +927,11 @@ def main() -> None:
 
     while True:
         if time.monotonic() >= deadline:
-            logger.info("Approaching walltime limit — resubmitting and exiting")
-            _resubmit_self()
-            return
+            logger.info(
+                "Approaching walltime limit — exiting %d so the host sbatch script resubmits the"
+                " next cycle", RESUBMIT_EXIT_CODE,
+            )
+            sys.exit(RESUBMIT_EXIT_CODE)
 
         entry = claim_next_pending()
         if entry is None:
