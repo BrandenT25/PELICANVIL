@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pelicanfs import OSDFFileSystem
-import fsspec, os, json, shutil, logging, sqlite3
+import fsspec, os, json, shutil, logging, sqlite3, time
 from pathlib import Path
 from urllib.parse import quote
 from collections import defaultdict
@@ -169,6 +169,65 @@ def _attach_folder_sizes(entries: list) -> list:
     return entries
 
 
+# GitHub issue #6, Part 1 (2026-09-10 investigation): download_one_file used
+# to make exactly one attempt per pelicanfs call, so a single transient
+# connection blip failed the whole file and required the user to notice and
+# click Restart. This is the retry-with-backoff fix — deliberately much
+# smaller than scripts/indexing_worker.py's CONNECTION_RETRY_BACKOFFS =
+# [5, 15, 45]: that schedule is tuned for a 40,000-call unattended batch walk,
+# where a dataset can afford to spend a couple of minutes clearing a bad
+# patch. This is a single user-facing call with a progress indicator the
+# researcher is actively watching — 2 retries at 2s/5s (7s worst-case added
+# latency per file, 3 attempts total) is enough to ride out a dead pooled
+# connection or a brief DNS/handshake hiccup without the delay itself being
+# the next thing they complain about.
+DOWNLOAD_RETRY_BACKOFFS = [2, 5]
+
+
+def _with_connection_retry(description: str, fn):
+    """Calls fn() (a zero-arg callable performing exactly one blocking
+    pelicanfs isdir()/get()/get_file() call), retrying up to
+    len(DOWNLOAD_RETRY_BACKOFFS) more times if it raises a connection-class
+    exception (classify_failure(exc).code == "connection") — resetting the
+    shared filesystem singleton before each retry so a stale/dead aiohttp
+    session isn't reused on the next attempt, mirroring
+    scripts/indexing_worker.py's own reset-then-retry pattern for the same
+    exception classes (see api/core/failure_classification.py's
+    _is_connection_error).
+
+    Dispatches explicitly on classify_failure(exc).code rather than a
+    blanket except-and-retry — this is deliberate: the indexing worker's own
+    retry loop once had a real bug where an unclassified exception got
+    wrongly routed into the retry meant only for connection-class failures.
+    Any exception that isn't classified "connection" (auth_required,
+    not_found, permission, unknown) propagates immediately on the very first
+    attempt, unretried — retrying a genuine 404 or a permissions error
+    wouldn't fix it, would just delay reporting it, and is exactly the
+    misclassification this dispatch avoids repeating.
+
+    fn is responsible for re-resolving the filesystem itself on every call
+    (not capturing one `fs` reference from outside) — reset_default_filesystem
+    only replaces the module-level shared singleton going forward; a caller
+    holding a reference to the old instance from before the reset would keep
+    using the now-stale one otherwise.
+    """
+    attempts = len(DOWNLOAD_RETRY_BACKOFFS) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            if classify_failure(e).code != "connection" or attempt == attempts:
+                raise
+            backoff = DOWNLOAD_RETRY_BACKOFFS[attempt - 1]
+            logger.info(
+                "Connection-class failure on %s (attempt %d/%d): %s — resetting"
+                " filesystem singleton and retrying in %ds",
+                description, attempt, attempts, e, backoff,
+            )
+            reset_default_filesystem()
+            time.sleep(backoff)
+
+
 class DownloadError(Exception):
     """Raised by download_one_file instead of HTTPException. This is called
     from background job threads (api/routes/downloads.py), not just request
@@ -272,7 +331,20 @@ def _download_directory(fs, path: str, storage_location: str) -> None:
             " _download_directory's docstring for why)",
             path, remote_path, local_path,
         )
-        fs.get_file(_encode_path_segment(remote_path), local_path)
+        # Retried per-file (GitHub issue #6, Part 1), not by re-running the
+        # whole directory: a connection blip on file N of a large directory
+        # should only redo file N, not re-download the N-1 files that
+        # already succeeded. Re-resolves the filesystem itself on each
+        # attempt (via `path`, the directory's own namespace) rather than
+        # reusing the `fs` this function was called with — see
+        # _with_connection_retry's own docstring for why that matters after
+        # a mid-loop reset_default_filesystem() call.
+        _with_connection_retry(
+            f"download of {remote_path}",
+            lambda remote_path=remote_path, local_path=local_path: _resolve_filesystem(path).get_file(
+                _encode_path_segment(remote_path), local_path
+            ),
+        )
 
 
 def download_one_file(filepath: str, storage_location: str) -> None:
@@ -287,20 +359,31 @@ def download_one_file(filepath: str, storage_location: str) -> None:
     # background thread (api/routes/downloads.py's job worker), never from
     # directly inside a request handler.
     path = filepath.rstrip("/")
-    fs = _resolve_filesystem(path)
     try:
         # isdir() only swallows OSError (fsspec/spec.py) — a genuine
         # not-found on `path` falls through to the plain fs.get() branch
         # below and surfaces its own correctly-classified not-found error
         # exactly as before this change; any other kind of failure (auth,
         # connection, ...) propagates straight out of isdir() into this
-        # same except block, same as it always would have.
-        if fs.isdir(_encode_path_segment(path)):
+        # same except block, same as it always would have. Wrapped in the
+        # same connection-class retry as the transfer calls below (GitHub
+        # issue #6, Part 1) — re-resolves the filesystem on each attempt
+        # rather than reusing one `fs` reference, same reasoning as
+        # _download_directory's own per-file retry.
+        def _check_isdir():
+            fs = _resolve_filesystem(path)
+            return fs, fs.isdir(_encode_path_segment(path))
+
+        fs, is_dir = _with_connection_retry(f"checking path type for {path}", _check_isdir)
+        if is_dir:
             _download_directory(fs, path, storage_location)
         else:
             # Confirmed unaffected by the directory-walk bug above — left
-            # exactly as it was.
-            fs.get(_encode_path_segment(path), storage_location, recursive=True)
+            # exactly as it was, just retried on connection-class failure.
+            _with_connection_retry(
+                f"download of {path}",
+                lambda: _resolve_filesystem(path).get(_encode_path_segment(path), storage_location, recursive=True),
+            )
     except Exception as e:
         if _is_auth_required(e):
             raise DownloadAuthRequiredError(path) from None
