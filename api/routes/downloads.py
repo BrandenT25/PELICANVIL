@@ -325,6 +325,163 @@ def _enqueue_job(history_id: int, name: str, destination: str, paths: list[str],
     return job_id
 
 
+def _recover_interrupted_jobs() -> None:
+    """Called once at process start, right after _init_db() — same
+    "best-effort work done once per PUN process import" convention as
+    main.py's migrate_category_icons() (wrapped in try/except there for the
+    same reason this call site is below).
+
+    GitHub issue #6, Part 3: if the PUN process dies mid-download (Passenger
+    recycling, an app restart, a node/session issue), the background thread
+    running _run_download_job dies with it, without ever reaching its own
+    terminal _update_job/_finish_history_record calls — so that job's
+    download_jobs row is left stuck at whatever status ('pending' if the
+    executor hadn't even picked it up yet, 'in_progress' otherwise) it last
+    had, and its download_history counterpart stays 'in_progress' forever
+    too. There was previously no code anywhere that detected this on the
+    next process start — confirmed directly by reading
+    api/core/indexing_queue.py's own recover_interrupted(), whose docstring
+    states this gap explicitly (that function exists for the separate
+    indexing worker's own, structurally different, interrupted-job problem).
+
+    Detection needs no new state: a live process's _run_download_job always
+    drives a row through to a terminal status (complete/partial/failed)
+    before returning, exceptions included (see its own try/except Exception
+    fallback) — so a row parked at 'pending' or 'in_progress' at the moment
+    this function runs, before this fresh process has submitted anything of
+    its own yet, can only be left over from a *previous* process's death.
+
+    Resume, not just retry-from-scratch: download_jobs.files is written
+    after every single file (_run_download_job's _update_job(job_id,
+    files=files) inside its per-file loop, not just at the end), so the
+    last commit before death already has real per-file status. Files
+    already "succeeded" are preserved untouched; everything else — "failed",
+    "pending" (never attempted), and "retrying" (a manual restart that was
+    itself interrupted this time) — all get re-enqueued, since none of
+    those represent completed, verified work. Checking status != "succeeded"
+    rather than listing every non-terminal status by name is deliberate:
+    "retrying" is swept into the same retry bucket as "failed"/"pending"
+    here, not silently dropped or treated as some fourth case.
+
+    Keeps the same job_id rather than minting a new one (unlike a manual
+    restart via _restart_files/_enqueue_job) — datasets.js's pollDownloadJob
+    treats a non-ok response (e.g. a 404 from a deleted-and-recreated job
+    row) as a transient hiccup and keeps polling the *same* job_id up to
+    DOWNLOAD_POLL_MAX_ATTEMPTS; it has no way to learn about a replacement
+    job_id. Minting a new one would silently orphan any browser tab that
+    happened to still have an open toast polling the old id across the
+    restart. The Downloads history page doesn't care either way, since it
+    re-queries job_id fresh via listDownloadHistory's LEFT JOIN on every
+    load.
+
+    Multi-process guard: claims each row with an atomic
+    UPDATE ... WHERE status IN ('pending', 'in_progress') before doing
+    anything else with it, checking rowcount. _db_write_lock's own docstring
+    already notes it doesn't protect against a second OS process (only
+    against this process's own threads racing each other); if Passenger
+    ever runs more than one worker process for the same user, two processes
+    starting at once could otherwise both read the same stale row and both
+    re-enqueue the same download. SQLite only ever allows one writer at a
+    time regardless, so only one process's claim UPDATE can actually change
+    the row; the loser's rowcount comes back 0 and it skips that row rather
+    than double-enqueuing it.
+
+    No toast/push notification here — nobody's browser is guaranteed
+    connected at process cold-start, so there's no channel to push to
+    anyway. The resumed row simply shows 'in_progress' again, identical to
+    any other in-progress download, next time anything reads it — the
+    Downloads page's existing polling/rendering already handles that state
+    with no changes needed (confirmed by reading downloads.js/datasets.js:
+    both key off job_id + status alone, neither cares how a row got into
+    'in_progress').
+    """
+    con = _get_connection()
+    cur = con.cursor()
+    cur.execute("SELECT * FROM download_jobs WHERE status IN ('pending', 'in_progress')")
+    stale_jobs = cur.fetchall()
+    con.close()
+
+    recovered_history_ids = []
+    for job in stale_jobs:
+        job_id = job["job_id"]
+        history_id = job["history_id"]
+
+        # Atomic claim — see docstring's multi-process guard. A concurrent
+        # second process racing this same scan would lose this UPDATE (0
+        # rows matched, already claimed) and skip the row below.
+        with _db_write_lock:
+            con = _get_connection()
+            cur = con.cursor()
+            cur.execute(
+                "UPDATE download_jobs SET status = 'in_progress' WHERE job_id = ? AND status IN ('pending', 'in_progress')",
+                (job_id,),
+            )
+            claimed = cur.rowcount > 0
+            con.commit()
+            con.close()
+        if not claimed:
+            continue
+
+        all_files = json.loads(job["files"]) if job["files"] else []
+        preserved_files = [f for f in all_files if f.get("status") == "succeeded"]
+        retry_paths = [f["path"] for f in all_files if f.get("status") != "succeeded"]
+        sizes = {f["path"]: f["size"] for f in all_files if f.get("size") is not None}
+
+        if not retry_paths:
+            # Every file had already succeeded by the time the process
+            # died — this can happen if death landed between the last
+            # file's success and the job's own final _update_job/
+            # _finish_history_record calls. Finish it out now rather than
+            # leaving a fully-succeeded job sitting at 'in_progress' with
+            # nothing left to run.
+            history_files = [_history_file_entry(f) for f in all_files]
+            _update_job(job_id, status="complete", files=all_files, error_message=None)
+            _finish_history_record(history_id, "complete", None, history_files)
+            recovered_history_ids.append(history_id)
+            continue
+
+        # started_at is deliberately left untouched on both rows — this is
+        # a continuation of the same attempt, not a new user-initiated one
+        # (unlike _restart_files, which does reset it), so the displayed
+        # elapsed time stays honest.
+        with _db_write_lock:
+            con = _get_connection()
+            cur = con.cursor()
+            cur.execute(
+                "UPDATE download_history SET status = 'in_progress', finished_at = NULL, error_message = NULL WHERE id = ?",
+                (history_id,),
+            )
+            con.commit()
+            con.close()
+
+        # _run_download_job's own first _update_job(job_id, files=files)
+        # call (preserved + fresh "retrying" entries for retry_paths)
+        # overwrites download_jobs.files with the correct merged set before
+        # anything else runs — no need to pre-write it here, same as a
+        # normal _enqueue_job call doesn't need to either.
+        _job_executor.submit(
+            _run_download_job, job_id, history_id, job["destination"], retry_paths, preserved_files, sizes, True
+        )
+        recovered_history_ids.append(history_id)
+
+    if recovered_history_ids:
+        logger.info(
+            "Recovered %d interrupted download job(s) left over from a previous process: history_id=%s",
+            len(recovered_history_ids), recovered_history_ids,
+        )
+
+
+try:
+    _recover_interrupted_jobs()
+except Exception:
+    # Best-effort, same as main.py's migrate_category_icons() — a bug here
+    # must not prevent the app from serving. Worst case, an interrupted job
+    # from a previous process stays stuck at 'in_progress' exactly as it
+    # would have without this function existing at all; not worse than the
+    # pre-existing behavior.
+    logger.exception("Recovering interrupted download jobs failed at startup")
+
+
 @downloadsRouter.post("/datasets/download/start")
 async def startDownloadJob(payload: DownloadJobStart):
     if not payload.paths:
